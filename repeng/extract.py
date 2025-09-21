@@ -240,37 +240,36 @@ class ControlVector:
         return self.__mul__(1 / other)
     
 
-def PCAWeighted(train, weights, method: Literal['svd', 'eigen']= 'svd'):
+def PCAWeighted(train, weights, device="cpu"):
     """
     https://stats.stackexchange.com/questions/113485/weighted-principal-components-analysis\
     """
+    if weights is not None:
 
-    weights_flat = weights.flatten()
+        weights_flat = weights.flatten()
 
-    # Normalize weights
-    weights_norm = weights_flat / weights_flat.sum()
+        # Normalize weights to sum to 1
+        weights_norm = weights_flat / weights_flat.sum()
+    else:
+        weights_norm = np.ones_like(train)
     
     # Weighted mean and centering
     weighted_mean = np.average(train, axis=0, weights=weights_flat)
-    train_centered = train - weighted_mean
+    train = train - weighted_mean
 
-    match method:
-        case 'eigen':            
-            # Weighted covariance
-            cov_matrix = (train_centered.T * weights_norm) @ train_centered
-            
-            # Get first PC via eigendecomposition
-            eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
-            return eigenvectors[:, -1].astype(np.float32)
-        case 'svd':
-
-            # Apply sqrt of weights to data (for weighted SVD)
-            train_weighted = train_centered * np.sqrt(weights_norm).reshape(-1, 1)
-
-            # Use SVD instead of covariance + eigh
-            # This avoids forming the 4096×4096 covariance matrix
-            U, S, Vt = np.linalg.svd(train_weighted, full_matrices=False)
-            return Vt[0].astype(np.float32)  # first PC
+    # Convert to torch tensor (move to GPU if available for speed)
+    train_torch = torch.from_numpy(train).to(device, dtype=torch.float32)
+    weights_norm_torch = torch.from_numpy(weights_norm).to(device, dtype=torch.float32)
+    
+    # Apply sqrt of weights
+    train_weighted_torch = train_torch * torch.sqrt(weights_norm_torch).unsqueeze(-1)
+    
+    # Torch SVD (full_matrices=False for efficiency)
+    U, S, Vt = torch.linalg.svd(train_weighted_torch, full_matrices=False)
+    
+    # First PC direction (move back to CPU/NumPy for compatibility)
+    direction = Vt[0].cpu().numpy().astype(np.float32)
+    return direction
 
 
 def read_representations(
@@ -279,7 +278,7 @@ def read_representations(
     inputs: list[DatasetEntry],
     hidden_layers: typing.Iterable[int] | None = None,
     batch_size: int = 32,
-    method: typing.Literal["pca_diff", "pca_center", "umap"] = "pca_diff",
+    method: typing.Literal["pca_diff", "pca_diff_weighted", "pca_center", "pca_center_weighted", "umap"] = "pca_diff",
     transform_hiddens: (
         typing.Callable[[dict[int, np.ndarray]], dict[int, np.ndarray]] | None
     ) = None,
@@ -313,26 +312,28 @@ def read_representations(
         if "pca_diff" in method:
             # run PCA on difference vectors between positive and negative examples
             train = h[::2] - h[1::2]
-            weights = (logps[::2] + logps[1::2]) / 2
-            # Normalize to [0, 2] range with mean ≈ 1
-            weights = (weights - weights.min()) / (weights.max() - weights.min()) * 2.0
+            weights = np.mean([logps[::2], logps[1::2]], 0)
         elif "pca_center" in method:
             # run PCA on per-pair center. removes the "absolute position" of each pair, focusing on relative positioning
             center = (h[::2] + h[1::2]) / 2
             train = h
             train[::2] -= center
-            train[1::2] -= center
-            # Normalize to [0, 2] range with mean ≈ 1  
-            weights = (logps - logps.min()) / (logps.max() - logps.min()) * 2.0
+            train[1::2] -= center 
+            weights = logps
         elif method == "umap":
+            # train = h[::2] - h[1::2]
+
+            center = (h[::2] + h[1::2]) / 2
             train = h
+            train[::2] -= center
+            train[1::2] -= center 
         else:
             raise ValueError("unknown method " + method)
 
         if method != "umap":
             if "weighted" in method:
                 # Experimental: Importance Sampling, weight by completion likelihood to get online hidden states (rather than offline policy rollouts that are less relevant to the model). See for example https://arxiv.org/abs/2410.04350 or https://www.research.ed.ac.uk/files/216243626/Importance_sampling_HANNA_DOA21122021_VOR_CC_BY.pdf
-                directions[layer] = PCAWeighted(train, weights.flatten())
+                directions[layer] = PCAWeighted(train, weights)
             else:
                 # shape (1, n_features)
                 pca_model = PCA(n_components=1, whiten=False).fit(train)
@@ -343,9 +344,13 @@ def read_representations(
             # still experimental so don't want to add this as a real dependency yet
             import umap  # type: ignore
 
-            umap_model = umap.UMAP(n_components=1)
+            umap_model = umap.UMAP(n_components=1, n_neighbors=150, metric='euclidean', init='pca', min_dist=1, densmap=False, spread=1.0)
             embedding = umap_model.fit_transform(train).astype(np.float32)
-            directions[layer] = np.sum(train * embedding, axis=0) / np.sum(embedding)
+            
+            # Normalize embedding to avoid extreme weights
+            embedding_norm = embedding / (np.linalg.norm(embedding) + 1e-8)
+            direction = np.sum(train * embedding_norm, axis=0) / (np.sum(embedding_norm) + 1e-8)
+            directions[layer] = direction
 
         # make sure the direction has positive personas as +ve (otherwise flip)
         # calculate sign
@@ -410,7 +415,7 @@ def batched_get_hiddens(
                     )
                     hidden_states[layer].append(hidden_state)
 
-                lprobs = out.logits[i].log_softmax(-1)
+                lprobs = out.logits[i, :-1].log_softmax(-1)
                 label_mask = attention_mask[i, 1:]
                 labels = encoded_batch["input_ids"][i, 1:, None]
                 lprobs_for_inputs = torch.gather(
