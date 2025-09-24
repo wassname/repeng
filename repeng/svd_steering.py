@@ -6,45 +6,40 @@ from typing import List, Tuple, Dict, Optional, Union
 
 def svd_steering(
     grad_matrix: torch.Tensor,
-    # target_layer: int, 
-    low_dim: int = 512, 
-    rank: int = 2, 
-    beta: float = 1.0
-) -> Dict[int, np.ndarray]:
+    # target_layer: int,
+    low_dim: int = 512,
+    rank: int = 2,
+    beta: float = 1.0,
+) -> np.ndarray:
     """
     Generate a steering vector using SVD on projected gradients.
-    
+
     Args:
         grad_matrix: Tensor of shape [num_pairs, hidden_dim] containing gradients
-        low_dim: Dimension to project gradients to before SVD
-        rank: Number of SVD components to use
-        beta: Temperature parameter for DPO loss
-        
+        low_dim: (Unused) Kept for API compatibility.
+        rank: (Unused) Kept for API compatibility.
+        beta: (Unused) Kept for API compatibility.
+
     Returns:
-        Dictionary mapping layer_id to steering vector
+        The steering vector as a numpy array.
     """
-    
-    # Stack gradients into a matrix # [num_pairs, hidden_dim]
-    
-    # Project to low-dim space for efficiency
-    hidden_dim = grad_matrix.shape[1]
-    torch.manual_seed(42)  # For reproducibility
-    R = torch.randn(hidden_dim, low_dim, device=grad_matrix.device)
-    proj_matrix = grad_matrix @ R  # [num_pairs, low_dim]
-    
-    # Apply SVD to the projected matrix
-    U, S, Vh = svd(proj_matrix, full_matrices=False)
-    
-    # Reconstruct steering vector from top components
-    low_dim_steer = U[:, :rank] @ torch.diag(S[:rank]) @ Vh[:rank]  # [num_pairs, low_dim]
-    low_dim_steer = low_dim_steer.mean(dim=0)  # Average to single vector [low_dim]
-    
-    # Unproject back to full space
-    full_steer = (R @ low_dim_steer).reshape(grad_matrix.shape[1])  # [hidden_dim]
-    
+    # HACK: The original implementation had several issues.
+    # 1. Random projection is not necessary and adds noise. SVD can run on the full matrix.
+    # 2. Reconstructing and averaging the vectors is not the standard way to get the principal direction.
+    #    The principal direction is simply the first right singular vector (Vh[0]).
+    # 3. The function returned a dictionary, but it should return a single vector array.
+
+    # Center the gradients
+    grad_matrix = grad_matrix - grad_matrix.mean(dim=0, keepdim=True)
+
+    # Apply SVD to the centered gradient matrix
+    _U, _S, Vh = svd(grad_matrix, full_matrices=False)
+
+    # The first right singular vector is the direction of highest variance
+    steering_vector = Vh[0]
+
     # Convert to numpy array for compatibility with ControlVector
-    steer_np = full_steer.detach().cpu().numpy()
-    
-    # Return as a dict mapping layer to steering vector
+    steer_np = steering_vector.detach().cpu().numpy()
+
     return steer_np
 
