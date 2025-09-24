@@ -45,6 +45,11 @@ class ControlModel(torch.nn.Module):
     @property
     def device(self) -> torch.device:
         return self.model.device
+    
+    @property
+    def dtype(self) -> torch.dtype:
+        p = next(iter(self.model.parameters()))
+        return p.dtype
 
     def unwrap(self) -> PreTrainedModel:
         """
@@ -76,7 +81,7 @@ class ControlModel(torch.nn.Module):
         for layer_id in self.layer_ids:
             raw_control[layer_id] = torch.tensor(
                 coeff * control.directions[layer_id]
-            ).to(self.model.device, dtype=self.model.dtype)
+            ).to(self.model.device, dtype=self.dtype)
         self.set_raw_control(raw_control, **kwargs)
 
     def reset(self) -> None:
