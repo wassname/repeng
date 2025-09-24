@@ -188,18 +188,32 @@ class ControlModule(torch.nn.Module):
 
         return output
 
+    def __getattr__(self, name: str) -> typing.Any:
+        if name in ("block", "params"):
+            # our properties - return normally
+            return super().__getattr__(name)
+        # delegate attr to wrapped module
+        return getattr(super().__getattr__("block"), name)
+
 
 def model_layer_list(model: ControlModel | PreTrainedModel) -> torch.nn.ModuleList:
     if isinstance(model, ControlModel):
         model = model.model
 
     target_suffixes = [
-    'model.layers',  # mistral, gemma, qwen,...
-    'model.transformer.h' # gpt-2
+        "repeng_layers",  # override
+        "model.layers",  # llama, mistral, gemma, qwen, ...
+        "transformer.h",  # gpt-2
     ]
     for suffix in target_suffixes:
-        candidates = [v for k,v in model.named_modules() if k.endswith(suffix)]
-        if len(candidates)==1:
+        candidates = [
+            v
+            for k, v in model.named_modules()
+            if k.endswith(suffix) and isinstance(v, torch.nn.ModuleList)
+        ]
+        if len(candidates) == 1:
             return candidates[0]
 
-    raise ValueError(f"don't know how to get layer list for {type(model)}")
+    raise ValueError(
+        f"don't know how to get layer list for {type(model)}! try assigning `model.repeng_layers = ...` to override this search."
+    )

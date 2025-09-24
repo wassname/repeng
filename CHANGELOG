@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0 - 2025-09-23
+
+* Better handing of model layers. (#73)
+  * Thanks to @wassname and @thiswillbeyourgithub ! :tada:
+* Fix for Qwen2 inference `attention_type`. (#73)
+* Reasoning dataset for steering thinking models. (#69)
+  * Thanks to @wassname ! :tada:
+* Add `compute_hiddens` hook for fancy things. (#74)
+  * See `notebooks/model_delta.ipynb` for an example.
+
 ## 0.4.0 - 2024-12-13
 
 * SAE support! See `notebooks/sae.ipynb` for an example. (#49)
