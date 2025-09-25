@@ -23,11 +23,9 @@ def svd_steering(
     Returns:
         The steering vector as a numpy array.
     """
-    # HACK: The original implementation had several issues.
     # 1. Random projection is not necessary and adds noise. SVD can run on the full matrix.
     # 2. Reconstructing and averaging the vectors is not the standard way to get the principal direction.
     #    The principal direction is simply the first right singular vector (Vh[0]).
-    # 3. The function returned a dictionary, but it should return a single vector array.
 
     # Center the gradients
     grad_matrix = grad_matrix - grad_matrix.mean(dim=0, keepdim=True)

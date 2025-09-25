@@ -7,18 +7,20 @@ import gguf
 import numpy as np
 from sklearn.decomposition import PCA
 import torch
-from torch import nn
+from jaxtyping import Float, Int
+from torch import nn, Tensor
 import torch.nn.functional as F
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 import tqdm
 
 from .control import ControlModel, model_layer_list
 
-# Import the SVD steering functionality
+from .svd_steering import svd_steering
 try:
-    from .svd_steering import svd_steering
+    from .fisher_steering import fisher_steering, get_fisher_matrices
 except ImportError:
-    svd_steering = None
+    fisher_steering = None
+    get_fisher_matrices = None
 
 
 @dataclasses.dataclass
@@ -84,7 +86,7 @@ class ControlVector:
         dataset: list[DatasetEntry],
         *,
         decode: bool = True,
-        method: typing.Literal["pca_diff", "pca_center", "umap"] = "pca_center",
+        method: typing.Literal["pca_diff", "pca_center", "fisher_steer", "svd_gradient"] = "pca_center",
         **kwargs,
     ) -> "ControlVector":
         """
@@ -332,84 +334,141 @@ def compute_dpo_loss(
     return losses.mean()
 
 
+def _collect_activations(
+    model: "PreTrainedModel | ControlModel",
+    tokenizer: PreTrainedTokenizerBase,
+    inputs: list, # Can be list[str] or list[DatasetEntry]
+    layers: list[int],
+    batch_size: int,
+    loss_fn: typing.Callable[[typing.Any, typing.Any], Float[Tensor, ""]] | None = None,
+) -> dict[int, dict[str, np.ndarray]]:
+    """
+    Internal helper to collect hidden states and optional gradients for specified layers.
+    It is loss-function-agnostic.
+    """
+    device = model.device
+    results = {layer: {'hiddens': [], 'grads': []} for layer in layers}
+    
+    activations = {}
+    def make_hook(layer_idx):
+        def hook_fn(module, input, output):
+            h = output[0].detach()
+            if loss_fn is not None:
+                h.requires_grad_(True)
+            activations[layer_idx] = h
+        return hook_fn
+
+    for i in tqdm.tqdm(range(0, len(inputs), batch_size), desc="Collecting Activations", leave=False):
+        batch = inputs[i : i + batch_size]
+        
+        # Tokenize based on input type
+        if isinstance(batch[0], str):
+            tokenized = tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=512).to(device)
+        elif isinstance(batch[0], DatasetEntry):
+            pos_prompts = [ex.positive for ex in batch]
+            neg_prompts = [ex.negative for ex in batch]
+            # HACK: For DPO, we need logprobs for both, so we pass them both through.
+            # This assumes the loss_fn knows how to handle the concatenated batch.
+            all_prompts = pos_prompts + neg_prompts
+            tokenized = tokenizer(all_prompts, return_tensors="pt", padding=True, truncation=True, max_length=512).to(device)
+
+        handles = [layer.register_forward_hook(make_hook(layer)) for i, layer in enumerate(layers)]
+
+        with torch.enable_grad():
+            model.zero_grad()
+            loss = loss_fn(model, tokenized)
+            if loss is not None:
+                loss.backward()
+
+        for handle in handles:
+            handle.remove()
+
+        sequence_lengths = tokenized.attention_mask.sum(dim=1) - 1
+        for layer in layers:
+            h_full = activations[layer]
+            h_last_token = h_full[torch.arange(h_full.shape[0]), sequence_lengths].cpu().numpy()
+            results[layer]['hiddens'].append(h_last_token)
+            
+            if loss_fn and h_full.grad is not None:
+                g_full = h_full.grad
+                g_last_token = g_full[torch.arange(g_full.shape[0]), sequence_lengths].cpu().numpy()
+                results[layer]['grads'].append(g_last_token)
+
+    for layer in layers:
+        results[layer]['hiddens'] = np.concatenate(results[layer]['hiddens'], axis=0)
+        if results[layer]['grads']:
+            results[layer]['grads'] = np.concatenate(results[layer]['grads'], axis=0)
+
+    return results
+
+
 def read_representations(
     model: "PreTrainedModel | ControlModel",
     tokenizer: PreTrainedTokenizerBase,
     inputs: list[DatasetEntry],
     hidden_layers: typing.Iterable[int] | None = None,
     batch_size: int = 32,
-    method: typing.Literal["pca_diff", "pca_center", "umap", "pca_diff_weighted", "pca_center_weighted"] = "pca_diff",
+    method: typing.Literal["pca_diff", "pca_center", "umap", "pca_diff_weighted", "pca_center_weighted", "svd_gradient", "fisher_steer"] = "pca_diff",
     compute_hiddens: ComputeHiddens | None = None,
     transform_hiddens: (
         typing.Callable[[dict[int, np.ndarray]], dict[int, np.ndarray]] | None
     ) = None,
 ) -> dict[int, np.ndarray]:
-    """
-    Extract the representations based on the contrast dataset.
-    """
-    if not hidden_layers:
-        hidden_layers = range(-1, -model.config.num_hidden_layers, -1)
+    if hidden_layers is None:
+        hidden_layers = model_layer_list(model)
+    hidden_layers = list(hidden_layers)
 
-    # normalize the layer indexes if they're negative
-    n_layers = len(model_layer_list(model))
-    hidden_layers = [i if i >= 0 else n_layers + i for i in hidden_layers]
+    # A. Collect necessary data based on method
+    dpo_grads, F_matrices, pca_hiddens = {}, {}, {}
 
-    # the order is [positive, negative, positive, negative, ...]
-    train_strs = [s for ex in inputs for s in (ex.positive, ex.negative)]
+    if method in ["svd_gradient", "fisher_steer"]:
+        def dpo_loss_fn(model, tokenized):
+            # Assumes tokenized batch is [pos..., neg...]
+            batch_size = tokenized.input_ids.shape[0] // 2
+            outputs = model(**tokenized)
+            logits = outputs.logits # [2*batch, seq_len, vocab]
+            # Get logprobs for the actual completions
+            logprobs = torch.nn.functional.log_softmax(logits, dim=-1)
+            # HACK: This gathers the logprob of the actual next token
+            labels = tokenized.input_ids[:, 1:]
+            all_logprobs = logprobs[:, :-1, :].gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
+            
+            pos_logprobs, neg_logprobs = all_logprobs.split(batch_size, dim=0)
+            loss = -compute_dpo_loss(pos_logprobs.sum(-1), neg_logprobs.sum(-1))
+            return loss.mean()
 
-    if compute_hiddens is None:
-        layer_hiddens, logps, grads = batched_get_hiddens(
-            model, tokenizer, train_strs, hidden_layers, batch_size
-        )
-    else:
-        layer_hiddens, logps, grads = compute_hiddens(
-            model=model,
-            tokenizer=tokenizer,
-            train_strs=train_strs,
-            hidden_layers=hidden_layers,
-            batch_size=batch_size,
-        )
+        dpo_data = _collect_activations(model, tokenizer, inputs, hidden_layers, batch_size, loss_fn=dpo_loss_fn)
+        for layer in hidden_layers:
+            # The DPO grad is G(pos) - G(neg)
+            pos_grads, neg_grads = np.split(dpo_data[layer]['grads'], 2)
+            dpo_grads[layer] = pos_grads - neg_grads
 
-    if transform_hiddens is not None:
-        layer_hiddens = transform_hiddens(layer_hiddens)
+    if method == "fisher_steer":
+        F_matrices = get_fisher_matrices(model, tokenizer, [ex.positive for ex in inputs], hidden_layers, batch_size)
 
-    # get directions for each layer using PCA
+    if "pca" in method:
+        all_prompts = [ex.positive for ex in inputs] + [ex.negative for ex in inputs]
+        pca_data = _collect_activations(model, tokenizer, all_prompts, hidden_layers, batch_size, loss_fn=None)
+        for layer in hidden_layers:
+            pca_hiddens[layer] = pca_data[layer]['hiddens']
+
+    # B. Compute directions
     directions: dict[int, np.ndarray] = {}
     for layer in tqdm.tqdm(hidden_layers):
-        h = layer_hiddens[layer]
-        assert h.shape[0] == len(inputs) * 2
+        if method == "svd_gradient":
+            grad_matrix = torch.from_numpy(dpo_grads[layer])
+            directions[layer] = svd_steering(grad_matrix)
+        
+        elif method == "fisher_steer":
+            grad_matrix = torch.from_numpy(dpo_grads[layer])
+            F_matrix = F_matrices[layer]
+            directions[layer] = fisher_steering(grad_matrix, F_matrix)
 
-        if "pca_diff" in method:
+        else: # PCA-based methods
+            h = pca_hiddens[layer]
             # run PCA on difference vectors between positive and negative examples
             train = h[::2] - h[1::2]
-        elif "pca_center" in method:
-            # run PCA on per-pair center. removes the "absolute position" of each pair, focusing on relative positioning
-            center = (h[::2] + h[1::2]) / 2
-            train = h
-            train[::2] -= center
-            train[1::2] -= center
-        elif "svd" in method:
-            # run SVD on the hidden states
-            train = h[::2] - h[1::2]
-        else:
-            raise ValueError("unknown method " + method)
-
-        # Experimental: Importance Sampling, weight by completion likelihood to get online hidden states (rather than offline policy rollouts that are less relevant to the model). See for example https://arxiv.org/abs/2410.04350 or https://www.research.ed.ac.uk/files/216243626/Importance_sampling_HANNA_DOA21122021_VOR_CC_BY.pdf
-        directions[layer] = PCAWeighted(train)
-
-
-        if "svd_gradient" in method:
-            if svd_steering is None:
-                raise ImportError("svd_steering requires PyTorch")
-            if grads is None:
-                raise ValueError("svd_gradient method requires gradients from compute_hiddens")
-            grad_matrix = grads[layer]
-            directions[layer] = svd_steering(
-                grad_matrix=torch.from_numpy(grad_matrix),
-                low_dim=64,
-                rank=2,
-                beta=1.0,
-            )
+            directions[layer] = PCAWeighted(train)
 
         # make sure the direction has positive personas as +ve (otherwise flip)
         # calculate sign
