@@ -386,31 +386,52 @@ def read_representations(
                     use_empirical_fim=use_empirical_fim,
                 )
 
+            # make sure the direction has positive personas as +ve (otherwise flip)
+            # calculate sign
+            projected_hiddens = project_onto_direction(grad_matrix, directions[layer])
+
+            # order is [positive, negative, positive, negative, ...]
+            positive_smaller_mean = torch.tensor(
+                [
+                    projected_hiddens[i] < projected_hiddens[i + 1]
+                    for i in range(0, len_inputs * 2, 2)
+                ]
+            ).float().mean()
+            positive_larger_mean = torch.tensor(
+                [
+                    projected_hiddens[i] > projected_hiddens[i + 1]
+                    for i in range(0, len_inputs * 2, 2)
+                ]
+            ).float().mean()
+
+            if positive_smaller_mean > positive_larger_mean:  # type: ignore
+                directions[layer] *= -1
+
         else: # PCA-based methods
             # run PCA on difference vectors between positive and negative examples
             train = h[::2] - h[1::2]
             directions[layer] = PCAWeighted(train)
 
-        # make sure the direction has positive personas as +ve (otherwise flip)
-        # calculate sign
-        projected_hiddens = project_onto_direction(h, directions[layer])
+            # make sure the direction has positive personas as +ve (otherwise flip)
+            # calculate sign
+            projected_hiddens = project_onto_direction(h, directions[layer])
 
-        # order is [positive, negative, positive, negative, ...]
-        positive_smaller_mean = torch.tensor(
-            [
-                projected_hiddens[i] < projected_hiddens[i + 1]
-                for i in range(0, len_inputs * 2, 2)
-            ]
-        ).float().mean()
-        positive_larger_mean = torch.tensor(
-            [
-                projected_hiddens[i] > projected_hiddens[i + 1]
-                for i in range(0, len_inputs * 2, 2)
-            ]
-        ).float().mean()
+            # order is [positive, negative, positive, negative, ...]
+            positive_smaller_mean = torch.tensor(
+                [
+                    projected_hiddens[i] < projected_hiddens[i + 1]
+                    for i in range(0, len_inputs * 2, 2)
+                ]
+            ).float().mean()
+            positive_larger_mean = torch.tensor(
+                [
+                    projected_hiddens[i] > projected_hiddens[i + 1]
+                    for i in range(0, len_inputs * 2, 2)
+                ]
+            ).float().mean()
 
-        if positive_smaller_mean > positive_larger_mean:  # type: ignore
-            directions[layer] *= -1
+            if positive_smaller_mean > positive_larger_mean:  # type: ignore
+                directions[layer] *= -1
 
     return directions
 

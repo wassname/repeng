@@ -170,7 +170,7 @@ and the new reprpo loss with nll margin
 | fisher_steer_cov_reg3 |  nan    | nan    |          0.2 |           nan |    nan    |  nan    | nan    | nan    |
 
 
-balancing better
+balancing better... this actually works really well! I should try this in the reprpo repo too
 
 | method                |   slope |     r2 |   valid_frac |   effect_size |   p_value |   score |    min |    max |
 |:----------------------|--------:|-------:|-------------:|--------------:|----------:|--------:|-------:|-------:|
@@ -181,3 +181,20 @@ balancing better
 | svd_steer             |    0.77 |   0.14 |          1   |           nan |      0.53 |    0.11 |  16    |  20.75 |
 | fisher_steer_reg4     |  nan    | nan    |          0.2 |           nan |    nan    |  nan    | nan    | nan    |
 | fisher_steer_cov_reg3 |  nan    | nan    |          0.2 |           nan |    nan    |  nan    | nan    | nan    |
+
+
+with longer token limits (as some steering was making it think for a long time)
+
+| method                |   slope |     r2 |   valid_frac |   effect_size |   p_value |   score |    min |    max |
+|:----------------------|--------:|-------:|-------------:|--------------:|----------:|--------:|-------:|-------:|
+| fisher_steer_cov_reg1 |  -18.01 |   0.88 |          1   |           nan |      0.02 |   15.93 | -14.12 |  28.12 |
+| fisher_steer_dual     |  -21    |   0.66 |          0.8 |           nan |      0.19 |    8.86 | -15.25 |  24.12 |
+| fisher_steer_reg2     |  -19.36 |   0.54 |          0.8 |           nan |      0.26 |    6.75 | -15.87 |  26.88 |
+| pca_diff              |    0.85 |   0.08 |          1   |           nan |      0.66 |    0.06 |  14    |  20.62 |
+| svd_steer             |    0.1  |   0    |          1   |           nan |      0.97 |    0    |  11    |  20.75 |
+| fisher_steer_reg4     |  nan    | nan    |          0.2 |           nan |    nan    |  nan    | nan    | nan    |
+| fisher_steer_cov_reg3 |  nan    | nan    |          0.2 |           nan |    nan    |  nan    | nan    | nan    |
+
+
+TODO the direction finding thing should more like use a forward pass to work out the direction
+TODO try larger model, get it working with bitsand bytes
