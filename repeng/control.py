@@ -5,6 +5,7 @@ import typing
 from typing import Dict, List, Optional, Iterable, Tuple, Union, Callable, Any, TYPE_CHECKING
 from jaxtyping import Float
 import warnings
+from collections import OrderedDict
 from baukit import TraceDict
 import torch
 from torch import Tensor, nn
@@ -38,7 +39,7 @@ class ControlModel(torch.nn.Module):
     A wrapped language model that can have controls set on its layers with `self.set_control`.
     """
 
-    def __init__(self, model: PreTrainedModel, directions: Dict[str, BlockControlParams] = {}) -> None:
+    def __init__(self, model: PreTrainedModel, directions: OrderedDict[str, BlockControlParams] = {}) -> None:
         """
         **This mutates the wrapped `model`! Be careful using `model` after passing it to this class.**
 
@@ -54,7 +55,6 @@ class ControlModel(torch.nn.Module):
             )
             model = model.model
 
-        layers = model_layer_list(model)
         self.directions = directions
         self.reset()
 
@@ -90,8 +90,9 @@ class ControlModel(torch.nn.Module):
         if control is None:
             return self.reset()
         else:
+            self.directions = control.directions
             self.edit_fn = functools.partial(
-                baukit_dir_add_hook, directions=coeff * control.directions
+                baukit_dir_add_hook, directions=control.directions, coeff=coeff
             )
 
     def reset(self) -> None:
@@ -101,7 +102,13 @@ class ControlModel(torch.nn.Module):
         self.edit_fn = noop_edit
 
     def _steer(self, fn: Callable, *args, **kwargs):
-        with self._make_trace():
+        with TraceDict(
+            self.model, 
+            layers=list(self.directions.keys()),
+            retain_output=False,
+            detach=True,
+            edit_output=self.edit_fn,
+        ) as td:
             return fn(*args, **kwargs)
 
     def forward(self, *args, **kwargs):
@@ -197,7 +204,8 @@ def baukit_dir_add_hook(
     output: Float[Tensor, "... d_act"],
     layer: str,
     inputs,
-    directions: Dict[str, Float[Tensor, "d_act"]],
+    directions: Dict[str, Float[Tensor, "... d_act"]],
+    coeff: float = 1.0,
 ):
     """
     edit layer output by adding, used in baukit
@@ -206,7 +214,7 @@ def baukit_dir_add_hook(
         modified = output[0]
     else:
         modified = output
-    direction = directions[layer].to(output.device)
+    direction = directions[layer].to(device=output.device, dtype=output.dtype) * coeff
     modified = modified + direction
     if isinstance(output, tuple):
         output = (modified,) + output[1:]

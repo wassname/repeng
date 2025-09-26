@@ -2,7 +2,7 @@ import dataclasses
 import os
 import typing
 import warnings
-from typing import Literal
+from typing import Literal, OrderedDict
 import gguf
 import numpy as np
 from sklearn.decomposition import PCA
@@ -17,7 +17,7 @@ from baukit import TraceDict
 from .control import ControlModel, model_layer_list
 from .dataset import DatasetEntry
 from .svd_steering import svd_steering
-from .fisher_steering import fisher_steering, get_fisher_matrices
+from .fisher_steering import natural_gradient_steering
 
 
 
@@ -33,6 +33,8 @@ class ControlVector:
         model: "PreTrainedModel | ControlModel",
         tokenizer: PreTrainedTokenizerBase,
         dataset: list[DatasetEntry],
+        hidden_layers: typing.Iterable[str] | None = None,
+        batch_size: int = 32,
         **kwargs,
     ) -> "ControlVector":
         """
@@ -55,12 +57,19 @@ class ControlVector:
         Returns:
             ControlVector: The trained vector.
         """
+        # the order is [positive, negative, positive, negative, ...]
+        train_strs = [s for ex in dataset for s in (ex.positive, ex.negative)]
+
+        # gather hidden states
+        act, logprobs, grads = _collect_activations_grads(model, tokenizer, train_strs, hidden_layers, batch_size)
+
+        # compute directions
         dirs = read_representations(
-            model,
-            tokenizer,
-            dataset,
+            act, logprobs, grads,
             **kwargs,
         )
+
+        # init class
         return cls(model_type=model.config.model_type, directions=dirs)
 
     # @classmethod
@@ -240,7 +249,7 @@ class ControlVector:
         return self.__mul__(1 / other)
     
 
-def PCAWeighted(train, weights=None, device="cpu"):
+def PCAWeighted(train, weights=None):
     """
     https://stats.stackexchange.com/questions/113485/weighted-principal-components-analysis\
     """
@@ -249,24 +258,20 @@ def PCAWeighted(train, weights=None, device="cpu"):
         # Normalize weights to sum to 1
         weights_norm = weights_flat / weights_flat.sum()
     else:
-        weights_norm = np.ones(train.shape[0])
+        weights_norm = torch.ones(train.shape[0])
     
     # Weighted mean and centering
-    weighted_mean = np.average(train, axis=0, weights=weights_norm)
+    weighted_mean = torch.sum(train * weights_norm.unsqueeze(-1), dim=0) / weights_norm.sum()
     train = train - weighted_mean
-
-    # Convert to torch tensor (move to GPU if available for speed)
-    train_torch = torch.from_numpy(train).to(device, dtype=torch.float32)
-    weights_norm_torch = torch.from_numpy(weights_norm).to(device, dtype=torch.float32)
     
     # Apply sqrt of weights
-    train_weighted_torch = train_torch * torch.sqrt(weights_norm_torch).unsqueeze(-1)
+    train_weighted_torch = train * torch.sqrt(weights_norm).unsqueeze(-1)
     
     # Torch SVD (full_matrices=False for efficiency)
     U, S, Vt = torch.linalg.svd(train_weighted_torch, full_matrices=False)
     
-    # First PC direction (move back to CPU/NumPy for compatibility)
-    direction = Vt[0].cpu().numpy().astype(np.float32)
+    # First PC direction
+    direction = Vt[0].cpu()
     return direction
 
 
@@ -282,40 +287,106 @@ class ComputeHiddens(typing.Protocol):
 
 
 def read_representations(
-    model: "PreTrainedModel | ControlModel",
-    tokenizer: PreTrainedTokenizerBase,
-    inputs: list[DatasetEntry],
-    hidden_layers: typing.Iterable[str] | None = None,
-    batch_size: int = 32,
+    act: dict[str, Tensor],
+    logprobs: Tensor,
+    grads: dict[str, Tensor | None],
     method: typing.Literal["pca_diff", "pca_center", "umap", "pca_diff_weighted", "pca_center_weighted", "svd_gradient", "fisher_steer"] = "pca_diff",
-    # compute_hiddens: ComputeHiddens | None = None,
-    # transform_hiddens: (
-    #     typing.Callable[[dict[str, np.ndarray]], dict[str, np.ndarray]] | None
-    # ) = None,
 ) -> dict[str, np.ndarray]:
-    if hidden_layers is None:
-        hidden_layers = model_layer_list(model)
-    hidden_layers = list(hidden_layers)
-
-    # the order is [positive, negative, positive, negative, ...]
-    train_strs = [s for ex in inputs for s in (ex.positive, ex.negative)]
-
-    act, grads, logprobs = _collect_activations_grads(model, tokenizer, train_strs, hidden_layers, batch_size)
+    
+    hidden_layers= list(act.keys())
+    len_inputs = logprobs.shape[0]//2
 
     # B. Compute directions
-    directions: dict[str, np.ndarray] = {}
+    directions: OrderedDict[str, torch.Tensor] = OrderedDict()
     for layer in tqdm.tqdm(hidden_layers):
-        if method == "svd_gradient":
-            grad_matrix = grads[layer]
-            directions[layer] = svd_steering(grad_matrix)
+        h = act[layer].clone()
+
+        use_empirical_fim = True
+        if '_cov' in method:
+            use_empirical_fim = False
         
-        elif method == "fisher_steer":
-            grad_matrix = grads[layer]
-            F_matrix = grads[layer]
-            directions[layer] = fisher_steering(grad_matrix, F_matrix)
+        grad_matrix = grads[layer].clone()
+        
+        if method == "svd_gradient":
+            # For concept extraction, flip negative gradients
+            # grad_matrix[1::2] *= -1  # Now all gradients point "toward honesty" 
+            directions[layer] = svd_steering(grad_matrix)
+
+            # TODO importance sampling from logprobs
+        
+        elif "fisher_steer" in method:
+            low_dim=None
+
+            if '_dual' in method:
+                # Separate Fisher for pos/neg
+                grad_pos = grad_matrix[::2]   # [n/2, dim]
+                grad_neg = grad_matrix[1::2]  # [n/2, dim]
+                
+                # Two natural gradients
+                low_dim = None
+                v_pos = natural_gradient_steering(grad_pos, low_dim=low_dim)
+                v_neg = natural_gradient_steering(grad_neg, low_dim=low_dim)
+
+                if '_pos' in method:
+                    directions[layer] = v_pos
+                elif '_neg' in method:
+                    directions[layer] = v_neg
+                elif '_diff' in method:
+                    # Difference: pos - neg
+                    directions[layer] = v_pos - v_neg
+                else:
+                    # Combine: pos direction and neg direction
+                    directions[layer] = (v_pos + v_neg) / 2.0
+            elif '_reg0' in method:
+                directions[layer] = natural_gradient_steering(
+                    grad_matrix, 
+                    low_dim=low_dim,
+                    lambda_reg=1e-0,
+                    use_empirical_fim=use_empirical_fim,
+                )
+            elif '_reg1' in method:
+                directions[layer] = natural_gradient_steering(
+                    grad_matrix, 
+                    low_dim=low_dim,
+                    lambda_reg=1e-1,
+                    use_empirical_fim=use_empirical_fim,
+                )
+            elif '_reg2' in method:
+                directions[layer] = natural_gradient_steering(
+                    grad_matrix, 
+                    low_dim=low_dim,
+                    lambda_reg=1e-2,
+                    use_empirical_fim=use_empirical_fim,
+                )
+            elif '_reg3' in method:
+                directions[layer] = natural_gradient_steering(
+                    grad_matrix, 
+                    low_dim=low_dim,
+                    lambda_reg=1e-3,
+                    use_empirical_fim=use_empirical_fim,
+                )
+            elif '_reg4' in method:
+                directions[layer] = natural_gradient_steering(
+                    grad_matrix, 
+                    low_dim=low_dim,
+                    lambda_reg=1e-4,
+                    use_empirical_fim=use_empirical_fim,
+                )
+            elif '_reg5' in method:
+                directions[layer] = natural_gradient_steering(
+                    grad_matrix, 
+                    low_dim=low_dim,
+                    lambda_reg=1e-5,
+                    use_empirical_fim=use_empirical_fim,
+                )
+            else:
+                directions[layer] = natural_gradient_steering(
+                    grad_matrix, 
+                    low_dim=low_dim,
+                    use_empirical_fim=use_empirical_fim,
+                )
 
         else: # PCA-based methods
-            h = act[layer]
             # run PCA on difference vectors between positive and negative examples
             train = h[::2] - h[1::2]
             directions[layer] = PCAWeighted(train)
@@ -325,18 +396,18 @@ def read_representations(
         projected_hiddens = project_onto_direction(h, directions[layer])
 
         # order is [positive, negative, positive, negative, ...]
-        positive_smaller_mean = np.mean(
+        positive_smaller_mean = torch.tensor(
             [
                 projected_hiddens[i] < projected_hiddens[i + 1]
-                for i in range(0, len(inputs) * 2, 2)
+                for i in range(0, len_inputs * 2, 2)
             ]
-        )
-        positive_larger_mean = np.mean(
+        ).float().mean()
+        positive_larger_mean = torch.tensor(
             [
                 projected_hiddens[i] > projected_hiddens[i + 1]
-                for i in range(0, len(inputs) * 2, 2)
+                for i in range(0, len_inputs * 2, 2)
             ]
-        )
+        ).float().mean()
 
         if positive_smaller_mean > positive_larger_mean:  # type: ignore
             directions[layer] *= -1
@@ -376,7 +447,8 @@ def _collect_activations_grads(
     """Get hidden states and their gradients."""
     assert batch_size % 2 == 0, "batch_size must be even for pos/neg pairs"
     batched_inputs = [inputs[p : p + batch_size] for p in range(0, len(inputs), batch_size)]
-
+    if isinstance(model, ControlModel):
+        model = model.model
     
     hidden_states: dict[str, list[np.ndarray]] = {layer: [] for layer in layers_to_edit}
     gradients: dict[str, list[np.ndarray]] = {layer: [] for layer in layers_to_edit}
@@ -425,19 +497,25 @@ def _collect_activations_grads(
                 loss.backward()
 
                 # get last non-padded token
-                seq_len = attention_mask.shape[1]
-                last_valid_idx = seq_len - attention_mask.flip(-1).to(torch.int64).argmax(dim=-1) - 1
+                seq_len = label_mask.shape[1]
+                last_valid_idx = seq_len - label_mask.flip(-1).to(torch.int64).cpu().argmax(dim=-1) - 1
+                # FIXME we are not computing loss on the last token so need to take 2nd to last?
 
                 # collect activation, grad, avg_logp_completion for each example in batch
                 for layer in layers_to_edit:
 
-                    grad = ret[layer].output.grad[:, last_valid_idx] # take gradient at last token
-                    gradients[layer].append(grad.detach().float().cpu().numpy())
+                    grad = ret[layer].output.grad.detach().float().cpu()
+                    last_grad = grad[range(len(last_valid_idx)), last_valid_idx]
 
-                    hs = ret[layer].output
-                    hidden_states[layer].append(hs[:, last_valid_idx].detach().float().cpu().numpy())
+                    # combined grads for pos/neg pairs since they share a loss
+                    # grad = grad.reshape(len(batch)//2, 2, grad.shape[-1]).sum(dim=1)
+                    gradients[layer].append(last_grad)
 
-                completion_lprob.extend(avg_logp_completion.detach().cpu().float().numpy())
+                    hs = ret[layer].output.detach().float().cpu()
+                    last_hs = hs[range(len(last_valid_idx)), last_valid_idx]
+                    hidden_states[layer].append(last_hs)
+
+                completion_lprob.extend(avg_logp_completion.detach().cpu().float())
 
 
 
@@ -449,18 +527,19 @@ def _collect_activations_grads(
     for param in model.parameters():
         param.requires_grad = True
 
-    # If no gradients were computed at all for a layer, the list will be empty.
-    # TODO: grad are the same for pos/neg pairs, so we could halve the size here?
-    final_grads = {k: np.vstack(v) if v else None for k, v in gradients.items()}
+    # stack layers
+    final_grads = {k: torch.vstack(v) if v else None for k, v in gradients.items()}
+    hidden_states = {k: torch.vstack(v) for k, v in hidden_states.items()}
+    completion_lprob = torch.tensor(completion_lprob)
     return (
-        {k: np.vstack(v) for k, v in hidden_states.items()},
-        np.array(completion_lprob),
-        final_grads,
+        hidden_states, # [batch, hidden_dim]
+        completion_lprob, # [batch]
+        final_grads, # [batch, hidden_dim] (same for pos/neg pairs since they share a loss)
     )
 
 
 def project_onto_direction(H, direction):
     """Project matrix H (n, d_1) onto direction vector (d_2,)"""
-    mag = np.linalg.norm(direction)
-    assert not np.isinf(mag)
+    mag = torch.linalg.norm(direction)
+    assert not torch.isinf(mag)
     return (H @ direction) / mag

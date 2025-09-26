@@ -17,8 +17,6 @@ def svd_steering(
     Args:
         grad_matrix: Tensor of shape [num_pairs, hidden_dim] containing gradients
         low_dim: (Unused) Kept for API compatibility.
-        rank: (Unused) Kept for API compatibility.
-        beta: (Unused) Kept for API compatibility.
 
     Returns:
         The steering vector as a numpy array.
@@ -36,8 +34,5 @@ def svd_steering(
     # The first right singular vector is the direction of highest variance
     steering_vector = Vh[0]
 
-    # Convert to numpy array for compatibility with ControlVector
-    steer_np = steering_vector.detach().cpu().numpy()
-
-    return steer_np
+    return steering_vector
 
