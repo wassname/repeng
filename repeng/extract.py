@@ -12,28 +12,20 @@ from torch import nn, Tensor
 import torch.nn.functional as F
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 import tqdm
-import baukit.nethook as nethook
+from baukit import TraceDict
 
 from .control import ControlModel, model_layer_list
-
+from .dataset import DatasetEntry
 from .svd_steering import svd_steering
-try:
-    from .fisher_steering import fisher_steering, get_fisher_matrices
-except ImportError:
-    fisher_steering = None
-    get_fisher_matrices = None
+from .fisher_steering import fisher_steering, get_fisher_matrices
 
 
-@dataclasses.dataclass
-class DatasetEntry:
-    positive: str
-    negative: str
 
 
 @dataclasses.dataclass
 class ControlVector:
     model_type: str
-    directions: dict[int, np.ndarray]
+    directions: dict[str, np.ndarray]
 
     @classmethod
     def train(
@@ -60,13 +52,6 @@ class ControlVector:
                     - "pca_center_weighted": PCA with weighted centered vectors
                     - "umap": UMAP dimensionality reduction
                     - "svd_gradient": SVD on gradients from DPO loss
-                compute_hiddens (Callable, optional): Override hidden state computation.
-                    See signature of `read_representations`.
-                transform_hiddens (Callable, optional): Transform the hidden states after
-                    they are computed. See signature of `read_representations`.
-                low_dim (int, optional): Low dimension for projection in SVD. Default 512.
-                rank (int, optional): Number of SVD components. Default 2.
-
         Returns:
             ControlVector: The trained vector.
         """
@@ -78,65 +63,65 @@ class ControlVector:
         )
         return cls(model_type=model.config.model_type, directions=dirs)
 
-    @classmethod
-    def train_with_sae(
-        cls,
-        model: "PreTrainedModel | ControlModel",
-        tokenizer: PreTrainedTokenizerBase,
-        sae,
-        dataset: list[DatasetEntry],
-        *,
-        decode: bool = True,
-        method: typing.Literal["pca_diff", "pca_center", "fisher_steer", "svd_gradient"] = "pca_center",
-        **kwargs,
-    ) -> "ControlVector":
-        """
-        Like ControlVector.train, but using an SAE. It's better! WIP.
+    # @classmethod
+    # def train_with_sae(
+    #     cls,
+    #     model: "PreTrainedModel | ControlModel",
+    #     tokenizer: PreTrainedTokenizerBase,
+    #     sae,
+    #     dataset: list[DatasetEntry],
+    #     *,
+    #     decode: bool = True,
+    #     method: typing.Literal["pca_diff", "pca_center", "fisher_steer", "svd_gradient"] = "pca_center",
+    #     **kwargs,
+    # ) -> "ControlVector":
+    #     """
+    #     Like ControlVector.train, but using an SAE. It's better! WIP.
 
 
-        Args:
-            model (PreTrainedModel | ControlModel): The model to train against.
-            tokenizer (PreTrainedTokenizerBase): The tokenizer to tokenize the dataset.
-            sae (saes.Sae): See the `saes` module for how to load this.
-            dataset (list[DatasetEntry]): The dataset used for training.
-            **kwargs: Additional keyword arguments.
-                decode (bool, optional): Whether to decode the vector to make it immediately usable.
-                    If not, keeps it as monosemantic SAE features for introspection, but you will need to decode it manually
-                    to use it. Defaults to True.
-                max_batch_size (int, optional): The maximum batch size for training.
-                    Defaults to 32. Try reducing this if you're running out of memory.
-                method (str, optional): The training method to use. Can be either
-                    "pca_diff" or "pca_center". Defaults to "pca_center"! This is different
-                    than ControlVector.train, which defaults to "pca_diff".
+    #     Args:
+    #         model (PreTrainedModel | ControlModel): The model to train against.
+    #         tokenizer (PreTrainedTokenizerBase): The tokenizer to tokenize the dataset.
+    #         sae (saes.Sae): See the `saes` module for how to load this.
+    #         dataset (list[DatasetEntry]): The dataset used for training.
+    #         **kwargs: Additional keyword arguments.
+    #             decode (bool, optional): Whether to decode the vector to make it immediately usable.
+    #                 If not, keeps it as monosemantic SAE features for introspection, but you will need to decode it manually
+    #                 to use it. Defaults to True.
+    #             max_batch_size (int, optional): The maximum batch size for training.
+    #                 Defaults to 32. Try reducing this if you're running out of memory.
+    #             method (str, optional): The training method to use. Can be either
+    #                 "pca_diff" or "pca_center". Defaults to "pca_center"! This is different
+    #                 than ControlVector.train, which defaults to "pca_diff".
 
-        Returns:
-            ControlVector: The trained vector.
-        """
+    #     Returns:
+    #         ControlVector: The trained vector.
+    #     """
 
-        def transform_hiddens(hiddens: dict[int, np.ndarray]) -> dict[int, np.ndarray]:
-            sae_hiddens = {}
-            for k, v in tqdm.tqdm(hiddens.items(), desc="sae encoding"):
-                sae_hiddens[k] = sae.layers[k].encode(v)
-            return sae_hiddens
+    #     def transform_hiddens(hiddens: dict[int, np.ndarray]) -> dict[int, np.ndarray]:
+    #         sae_hiddens = {}
+    #         for k, v in tqdm.tqdm(hiddens.items(), desc="sae encoding"):
+    #             sae_hiddens[k] = sae.layers[k].encode(v)
+    #         return sae_hiddens
 
-        # with torch.inference_mode():
-        dirs = read_representations(
-            model,
-            tokenizer,
-            dataset,
-            transform_hiddens=transform_hiddens,
-            method=method,
-            **kwargs,
-        )
+    #     # with torch.inference_mode():
+    #     dirs = read_representations(
+    #         model,
+    #         tokenizer,
+    #         dataset,
+    #         transform_hiddens=transform_hiddens,
+    #         method=method,
+    #         **kwargs,
+    #     )
 
-        final_dirs = {}
-        if decode:
-            for k, v in tqdm.tqdm(dirs.items(), desc="sae decoding"):
-                final_dirs[k] = sae.layers[k].decode(v)
-        else:
-            final_dirs = dirs
+    #     final_dirs = {}
+    #     if decode:
+    #         for k, v in tqdm.tqdm(dirs.items(), desc="sae decoding"):
+    #             final_dirs[k] = sae.layers[k].decode(v)
+    #     else:
+    #         final_dirs = dirs
 
-        return cls(model_type=model.config.model_type, directions=final_dirs)
+    #     return cls(model_type=model.config.model_type, directions=final_dirs)
 
     def export_gguf(self, path: os.PathLike[str] | str):
         """
@@ -181,14 +166,12 @@ class ControlVector:
         for tensor in reader.tensors:
             if not tensor.name.startswith("direction."):
                 continue
-            try:
-                layer = int(tensor.name.split(".")[1])
-            except (IndexError, ValueError):
+            layer = tensor.name[len("direction.") :]
+            if not layer:
                 raise ValueError(
                     f".gguf file has invalid direction field name: {tensor.name}"
                 )
             directions[layer] = tensor.data
-
         return cls(model_type=model_hint, directions=directions)
 
     def _helper_combine(
@@ -200,7 +183,7 @@ class ControlVector:
             )
 
         model_type = self.model_type
-        directions: dict[int, np.ndarray] = {}
+        directions: dict[str, np.ndarray] = {}
         for layer in self.directions:
             directions[layer] = self.directions[layer]
         for layer in other.directions:
@@ -239,13 +222,13 @@ class ControlVector:
         return self._helper_combine(other, -1)
 
     def __neg__(self) -> "ControlVector":
-        directions: dict[int, np.ndarray] = {}
+        directions: dict[str, np.ndarray] = {}
         for layer in self.directions:
             directions[layer] = -self.directions[layer]
         return ControlVector(model_type=self.model_type, directions=directions)
 
     def __mul__(self, other: int | float | np.number) -> "ControlVector":
-        directions: dict[int, np.ndarray] = {}
+        directions: dict[str, np.ndarray] = {}
         for layer in self.directions:
             directions[layer] = other * self.directions[layer]
         return ControlVector(model_type=self.model_type, directions=directions)
@@ -293,180 +276,46 @@ class ComputeHiddens(typing.Protocol):
         model: "PreTrainedModel | ControlModel",
         tokenizer: PreTrainedTokenizerBase,
         train_strs: list[str],
-        hidden_layers: list[int],
+        hidden_layers: list[str],
         batch_size: int,
-    ) -> dict[int, np.ndarray]: ...
-
-
-def compute_dpo_loss(
-    model_chosen_logprobs,
-    model_rejected_logprobs,
-    reference_chosen_logprobs=None,
-    reference_rejected_logprobs=None,
-    β=0.1,
-):
-    """Compute the DPO loss for a batch of policy and reference model log probabilities.
-
-    Args:
-        policy_chosen_logprobs: Log probabilities of the policy model for the chosen responses. Shape: (batch_size,)
-        policy_rejected_logprobs: Log probabilities of the policy model for the rejected responses. Shape: (batch_size,)
-        reference_chosen_logprobs: Log probabilities of the reference model for the chosen responses. Shape: (batch_size,)
-        reference_rejected_logprobs: Log probabilities of the reference model for the rejected responses. Shape: (batch_size,)
-        β: Temperature parameter for the DPO loss; typically something in the range of 0.1 to 0.5. We ignore the reference model as β -> 0.
-        label_smoothing: conservativeness for DPO loss.
-
-    Returns:
-        A tuple of three tensors: (loss, chosen_rewards, rejected_rewards).
-    """
-    # TODO add reference free DPO (was it KPO, or rainbowPO? I think that just used the ratio of cross entropies?) entropy normalised https://github.com/CapitalOne-Research/RainbowPO/blob/main/trl/trainer/dpo_trainer.py#L1148
-    # TODO add the thing to avoid degenerate solutions where it just makes the rejected very low but doens't make the chosen big
-    # TODO mean of logprobs like ipo to avoid length bias
-
-    model_logratios = model_chosen_logprobs - model_rejected_logprobs
-    logits = model_logratios
-    if reference_chosen_logprobs is not None and reference_rejected_logprobs is not None:
-        reference_logratios = reference_chosen_logprobs - reference_rejected_logprobs
-        logits = model_logratios - reference_logratios
-
-    # DPO (Eq. 7 of https://arxiv.org/pdf/2305.18290.pdf)
-    losses = -F.logsigmoid(β * logits)
-
-    # .mean() to average over the samples in the batch
-    return losses.mean()
-
-
-def _collect_activations(
-    model: "PreTrainedModel | ControlModel",
-    tokenizer: PreTrainedTokenizerBase,
-    inputs: list, # Can be list[str] or list[DatasetEntry]
-    layers: list[int],
-    batch_size: int,
-    loss_fn: typing.Callable[[typing.Any, typing.Any], Float[Tensor, ""]] | None = None,
-) -> dict[int, dict[str, np.ndarray]]:
-    """
-    Internal helper to collect hidden states and optional gradients for specified layers.
-    It is loss-function-agnostic.
-    """
-    device = model.device
-    results = {layer: {'hiddens': [], 'grads': []} for layer in layers}
-    
-    activations = {}
-    def make_hook(layer_idx):
-        def hook_fn(module, input, output):
-            h = output[0].detach()
-            if loss_fn is not None:
-                h.requires_grad_(True)
-            activations[layer_idx] = h
-        return hook_fn
-
-    for i in tqdm.tqdm(range(0, len(inputs), batch_size), desc="Collecting Activations", leave=False):
-        batch = inputs[i : i + batch_size]
-        
-        # Tokenize based on input type
-        if isinstance(batch[0], str):
-            tokenized = tokenizer(batch, return_tensors="pt", padding=True, truncation=True, max_length=512).to(device)
-        elif isinstance(batch[0], DatasetEntry):
-            pos_prompts = [ex.positive for ex in batch]
-            neg_prompts = [ex.negative for ex in batch]
-            # HACK: For DPO, we need logprobs for both, so we pass them both through.
-            # This assumes the loss_fn knows how to handle the concatenated batch.
-            all_prompts = pos_prompts + neg_prompts
-            tokenized = tokenizer(all_prompts, return_tensors="pt", padding=True, truncation=True, max_length=512).to(device)
-
-        handles = [layer.register_forward_hook(make_hook(layer)) for i, layer in enumerate(layers)]
-
-        with torch.enable_grad():
-            model.zero_grad()
-            loss = loss_fn(model, tokenized)
-            if loss is not None:
-                loss.backward()
-
-        for handle in handles:
-            handle.remove()
-
-        sequence_lengths = tokenized.attention_mask.sum(dim=1) - 1
-        for layer in layers:
-            h_full = activations[layer]
-            h_last_token = h_full[torch.arange(h_full.shape[0]), sequence_lengths].cpu().numpy()
-            results[layer]['hiddens'].append(h_last_token)
-            
-            if loss_fn and h_full.grad is not None:
-                g_full = h_full.grad
-                g_last_token = g_full[torch.arange(g_full.shape[0]), sequence_lengths].cpu().numpy()
-                results[layer]['grads'].append(g_last_token)
-
-    for layer in layers:
-        results[layer]['hiddens'] = np.concatenate(results[layer]['hiddens'], axis=0)
-        if results[layer]['grads']:
-            results[layer]['grads'] = np.concatenate(results[layer]['grads'], axis=0)
-
-    return results
+    ) -> dict[str, np.ndarray]: ...
 
 
 def read_representations(
     model: "PreTrainedModel | ControlModel",
     tokenizer: PreTrainedTokenizerBase,
     inputs: list[DatasetEntry],
-    hidden_layers: typing.Iterable[int] | None = None,
+    hidden_layers: typing.Iterable[str] | None = None,
     batch_size: int = 32,
     method: typing.Literal["pca_diff", "pca_center", "umap", "pca_diff_weighted", "pca_center_weighted", "svd_gradient", "fisher_steer"] = "pca_diff",
-    compute_hiddens: ComputeHiddens | None = None,
-    transform_hiddens: (
-        typing.Callable[[dict[int, np.ndarray]], dict[int, np.ndarray]] | None
-    ) = None,
-) -> dict[int, np.ndarray]:
+    # compute_hiddens: ComputeHiddens | None = None,
+    # transform_hiddens: (
+    #     typing.Callable[[dict[str, np.ndarray]], dict[str, np.ndarray]] | None
+    # ) = None,
+) -> dict[str, np.ndarray]:
     if hidden_layers is None:
         hidden_layers = model_layer_list(model)
     hidden_layers = list(hidden_layers)
 
-    # A. Collect necessary data based on method
-    dpo_grads, F_matrices, pca_hiddens = {}, {}, {}
+    # the order is [positive, negative, positive, negative, ...]
+    train_strs = [s for ex in inputs for s in (ex.positive, ex.negative)]
 
-    if method in ["svd_gradient", "fisher_steer"]:
-        def dpo_loss_fn(model, tokenized):
-            # Assumes tokenized batch is [pos..., neg...]
-            batch_size = tokenized.input_ids.shape[0] // 2
-            outputs = model(**tokenized)
-            logits = outputs.logits # [2*batch, seq_len, vocab]
-            # Get logprobs for the actual completions
-            logprobs = torch.nn.functional.log_softmax(logits, dim=-1)
-            # HACK: This gathers the logprob of the actual next token
-            labels = tokenized.input_ids[:, 1:]
-            all_logprobs = logprobs[:, :-1, :].gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
-            
-            pos_logprobs, neg_logprobs = all_logprobs.split(batch_size, dim=0)
-            loss = -compute_dpo_loss(pos_logprobs.sum(-1), neg_logprobs.sum(-1))
-            return loss.mean()
-
-        dpo_data = _collect_activations(model, tokenizer, inputs, hidden_layers, batch_size, loss_fn=dpo_loss_fn)
-        for layer in hidden_layers:
-            # The DPO grad is G(pos) - G(neg)
-            pos_grads, neg_grads = np.split(dpo_data[layer]['grads'], 2)
-            dpo_grads[layer] = pos_grads - neg_grads
-
-    if method == "fisher_steer":
-        F_matrices = get_fisher_matrices(model, tokenizer, [ex.positive for ex in inputs], hidden_layers, batch_size)
-
-    if "pca" in method:
-        all_prompts = [ex.positive for ex in inputs] + [ex.negative for ex in inputs]
-        pca_data = _collect_activations(model, tokenizer, all_prompts, hidden_layers, batch_size, loss_fn=None)
-        for layer in hidden_layers:
-            pca_hiddens[layer] = pca_data[layer]['hiddens']
+    act, grads, logprobs = _collect_activations_grads(model, tokenizer, train_strs, hidden_layers, batch_size)
 
     # B. Compute directions
-    directions: dict[int, np.ndarray] = {}
+    directions: dict[str, np.ndarray] = {}
     for layer in tqdm.tqdm(hidden_layers):
         if method == "svd_gradient":
-            grad_matrix = torch.from_numpy(dpo_grads[layer])
+            grad_matrix = grads[layer]
             directions[layer] = svd_steering(grad_matrix)
         
         elif method == "fisher_steer":
-            grad_matrix = torch.from_numpy(dpo_grads[layer])
-            F_matrix = F_matrices[layer]
+            grad_matrix = grads[layer]
+            F_matrix = grads[layer]
             directions[layer] = fisher_steering(grad_matrix, F_matrix)
 
         else: # PCA-based methods
-            h = pca_hiddens[layer]
+            h = act[layer]
             # run PCA on difference vectors between positive and negative examples
             train = h[::2] - h[1::2]
             directions[layer] = PCAWeighted(train)
@@ -494,18 +343,43 @@ def read_representations(
 
     return directions
 
-def batched_get_hiddens(
+
+def compute_simpo_loss(logp_pos, logp_neg):
+    """Compute the SimPO loss for a batch of positive and negative log probabilities.
+
+    Why do we use SimPO loss? Unlike DPO it's closer to our autoregressive steering use case, so the curvature of the loss landscape is more similar.
+
+    Args:
+        logp_pos: Log probabilities of the positive responses. Shape: (batch_size/2,)
+        logp_neg: Log probabilities of the negative responses. Shape: (batch_size/2,)
+    See 
+    - https://github.com/princeton-nlp/SimPO/blob/1b3e8f3528a23bce3da514a2dce8ea7490d4bc75/scripts/simpo_trainer.py#L560)
+    - https://github.com/princeton-nlp/SimPO/blob/1b3e8f3528a23bce3da514a2dce8ea7490d4bc75/scripts/simpo_config.py#L56
+    """
+    pi_logratios = logp_pos - logp_neg
+    gamma_beta_ratio = 0.25
+    beta = 2.0
+    label_smoothing = 0.0
+    logits = pi_logratios - gamma_beta_ratio
+    return (
+        -F.logsigmoid(beta * logits) * (1 - label_smoothing)
+        - F.logsigmoid(-beta * logits) * label_smoothing
+    ).mean()
+
+def _collect_activations_grads(
     model,
     tokenizer,
     inputs: list[str],
-    hidden_layers: list[int],
+    layers_to_edit: list[str],
     batch_size: int,
-) -> tuple[dict[int, np.ndarray], np.ndarray, dict[int, np.ndarray | None]]:
+) -> tuple[dict[str, np.ndarray], np.ndarray, dict[str, np.ndarray | None]]:
     """Get hidden states and their gradients."""
     assert batch_size % 2 == 0, "batch_size must be even for pos/neg pairs"
     batched_inputs = [inputs[p : p + batch_size] for p in range(0, len(inputs), batch_size)]
-    hidden_states: dict[int, list[np.ndarray]] = {layer: [] for layer in hidden_layers}
-    gradients: dict[int, list[np.ndarray]] = {layer: [] for layer in hidden_layers}
+
+    
+    hidden_states: dict[str, list[np.ndarray]] = {layer: [] for layer in layers_to_edit}
+    gradients: dict[str, list[np.ndarray]] = {layer: [] for layer in layers_to_edit}
     completion_lprob: list[np.ndarray] = []
 
     for batch in tqdm.tqdm(batched_inputs, desc="Getting hiddens"):
@@ -524,52 +398,50 @@ def batched_get_hiddens(
         # We need to enable gradients for the DPO loss calculation.
         with torch.enable_grad():
             model.zero_grad()
-            # output_hidden_states=True will give us the tensors we need.
-            # They will be part of the computation graph.
-            outputs = model(**encoded_batch, output_hidden_states=True)
+            with TraceDict(
+                model,
+                layers=layers_to_edit,
+                retain_output=True,
+                retain_grad=True,
+                detach=False,
+            ) as ret:
+                outputs = model(**encoded_batch, output_hidden_states=True)
 
-            # We must explicitly tell PyTorch to retain gradients for the non-leaf hidden state tensors.
-            for layer in hidden_layers:
-                outputs.hidden_states[layer].retain_grad()
+                # We must explicitly tell PyTorch to retain gradients for the non-leaf hidden state tensors.
+                for layer in layers_to_edit:
+                    ret[layer].output.retain_grad()
 
-            # --- DPO Loss Calculation ---
-            lprobs = outputs.logits[:, :-1].log_softmax(-1)
-            labels = encoded_batch["input_ids"][:, 1:, None]
-            lprobs_for_inputs = torch.gather(input=lprobs, dim=-1, index=labels).squeeze(-1)
-            
-            label_mask = attention_mask[:, 1:]
-            avg_logp_completion = (lprobs_for_inputs * label_mask).sum(-1) / label_mask.sum(-1)
-            completion_lprob.extend(avg_logp_completion.detach().cpu().float().numpy())
+                # --- DPO Loss Calculation ---
+                lprobs = outputs.logits[:, :-1].log_softmax(-1)
+                labels = encoded_batch["input_ids"][:, 1:, None]
+                lprobs_for_inputs = torch.gather(input=lprobs, dim=-1, index=labels).squeeze(-1)
+                
+                label_mask = attention_mask[:, 1:]
+                avg_logp_completion = (lprobs_for_inputs * label_mask).sum(-1) / label_mask.sum(-1)
 
-            logp_pos, logp_neg = avg_logp_completion[::2], avg_logp_completion[1::2]
-            loss = compute_dpo_loss(logp_pos, logp_neg)
+                logp_pos, logp_neg = avg_logp_completion[::2], avg_logp_completion[1::2]
 
-            # --- Gradient Calculation ---
-            # We backpropagate the loss. The gradients will accumulate on the hidden state tensors.
-            loss.backward()
+                loss = compute_simpo_loss(logp_pos, logp_neg)
+                loss.backward()
 
-            # --- Hidden State and Gradient Extraction ---
-            completion_lprob.extend(avg_logp_completion.detach().cpu().float().numpy())
-            last_positions = [mask.nonzero(as_tuple=True)[0][-1].item()-1 for mask in attention_mask]
-            for layer in hidden_layers:
-                hs_tensor = outputs.hidden_states[layer]
-                # The gradient is stored on the tensor we called .retain_grad() on.
-                grad_tensor = hs_tensor.grad
-                if grad_tensor is None:
-                    raise ValueError(f"No gradients computed for layer {layer}, cannot use svd_gradient method.")
+                # get last non-padded token
+                seq_len = attention_mask.shape[1]
+                last_valid_idx = seq_len - attention_mask.flip(-1).to(torch.int64).argmax(dim=-1) - 1
 
-                for i, pos in enumerate(last_positions):
-                    # Extract the hidden state for the last token.
-                    hs = hs_tensor[i, pos]
-                    hidden_states[layer].append(hs.detach().float().cpu().numpy())
-                    
-                    # Extract the corresponding gradient from the full gradient tensor.
-                    grad = grad_tensor[i, pos]
-                    if grad.sum()==0:
-                        raise ValueError(f"Zero gradient encountered for layer {layer}, cannot use svd_gradient method.")
+                # collect activation, grad, avg_logp_completion for each example in batch
+                for layer in layers_to_edit:
+
+                    grad = ret[layer].output.grad[:, last_valid_idx] # take gradient at last token
                     gradients[layer].append(grad.detach().float().cpu().numpy())
 
-        del outputs, loss, lprobs, lprobs_for_inputs, avg_logp_completion
+                    hs = ret[layer].output
+                    hidden_states[layer].append(hs[:, last_valid_idx].detach().float().cpu().numpy())
+
+                completion_lprob.extend(avg_logp_completion.detach().cpu().float().numpy())
+
+
+
+        del outputs, loss, lprobs, lprobs_for_inputs, avg_logp_completion, ret, grad, hs
         model.zero_grad()
         torch.cuda.empty_cache()
 
@@ -578,8 +450,8 @@ def batched_get_hiddens(
         param.requires_grad = True
 
     # If no gradients were computed at all for a layer, the list will be empty.
+    # TODO: grad are the same for pos/neg pairs, so we could halve the size here?
     final_grads = {k: np.vstack(v) if v else None for k, v in gradients.items()}
-
     return (
         {k: np.vstack(v) for k, v in hidden_states.items()},
         np.array(completion_lprob),

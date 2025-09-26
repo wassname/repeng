@@ -1,13 +1,35 @@
 import dataclasses
+import functools
+import re
 import typing
+from typing import Dict, List, Optional, Iterable, Tuple, Union, Callable, Any, TYPE_CHECKING
+from jaxtyping import Float
 import warnings
-
+from baukit import TraceDict
 import torch
+from torch import Tensor, nn
 from transformers import PretrainedConfig, PreTrainedModel
 
-if typing.TYPE_CHECKING:
+if TYPE_CHECKING:
     from .extract import ControlVector
 
+
+def noop_edit(output, layer, inputs):
+    return output
+
+
+
+@dataclasses.dataclass
+class BlockControlParams:
+    control: Tensor | None = None
+    normalize: bool = False
+    operator: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = (
+        lambda current, control: current + control
+    )
+
+    @classmethod
+    def default(cls) -> "BlockControlParams":
+        return cls()
 
 class ControlModel(torch.nn.Module):
     """
@@ -16,7 +38,7 @@ class ControlModel(torch.nn.Module):
     A wrapped language model that can have controls set on its layers with `self.set_control`.
     """
 
-    def __init__(self, model: PreTrainedModel, layer_ids: typing.Iterable[int]):
+    def __init__(self, model: PreTrainedModel, directions: Dict[str, BlockControlParams] = {}) -> None:
         """
         **This mutates the wrapped `model`! Be careful using `model` after passing it to this class.**
 
@@ -26,17 +48,15 @@ class ControlModel(torch.nn.Module):
 
         super().__init__()
         self.model = model
+        if isinstance(model, ControlModel):
+            warnings.warn(
+                "Trying to wrap a wrapped model! Probably not what you want! Try calling .unwrap first."
+            )
+            model = model.model
 
         layers = model_layer_list(model)
-        self.layer_ids = [i if i >= 0 else len(layers) + i for i in layer_ids]
-        for layer_id in layer_ids:
-            layer = layers[layer_id]
-            if not isinstance(layer, ControlModule):
-                layers[layer_id] = ControlModule(layer)
-            else:
-                warnings.warn(
-                    "Trying to rewrap a wrapped model! Probably not what you want! Try calling .unwrap first."
-                )
+        self.directions = directions
+        self.reset()
 
     @property
     def config(self) -> PretrainedConfig:
@@ -52,14 +72,6 @@ class ControlModel(torch.nn.Module):
         return p.dtype
 
     def unwrap(self) -> PreTrainedModel:
-        """
-        Removes the mutations done to the wrapped model and returns it.
-        After using this method, `set_control` and `reset` will not work.
-        """
-
-        layers = model_layer_list(self.model)
-        for layer_id in self.layer_ids:
-            layers[layer_id] = layers[layer_id].block
         return self.model
 
     def set_control(
@@ -71,134 +83,36 @@ class ControlModel(torch.nn.Module):
         `coeff` defaults to `1.0`.
 
         Additional kwargs:
-        - `normalize: bool`: track the magnitude of the non-modified activation, and rescale the
-          activation to that magnitude after control (default: `False`)
         - `operator: Callable[[Tensor, Tensor], Tensor]`: how to combine the base output and control
           (default: +)
         """
-
-        raw_control = {}
-        for layer_id in self.layer_ids:
-            raw_control[layer_id] = torch.tensor(
-                coeff * control.directions[layer_id]
-            ).to(self.model.device, dtype=self.dtype)
-        self.set_raw_control(raw_control, **kwargs)
+        
+        if control is None:
+            return self.reset()
+        else:
+            self.edit_fn = functools.partial(
+                baukit_dir_add_hook, directions=coeff * control.directions
+            )
 
     def reset(self) -> None:
         """
         Resets the control for all layer_ids, returning the model to base behavior.
         """
-        self.set_raw_control(None)
+        self.edit_fn = noop_edit
 
-    def set_raw_control(
-        self, control: dict[int, torch.Tensor] | None, **kwargs
-    ) -> None:
-        """
-        Set or remove control parameters to the layers this ControlModel handles.
-        The keys of `control` should be equal to or a superset of the `layer_ids` passed to __init__.
-        Only those layers will be controlled, any others in `control` will be ignored.
-
-        Passing `control=None` will reset the control tensor for all layer_ids, making the model act
-        like a non-control model.
-
-        Additional kwargs:
-        - `normalize: bool`: track the magnitude of the non-modified activation, and rescale the
-          activation to that magnitude after control (default: `False`)
-        - `operator: Callable[[Tensor, Tensor], Tensor]`: how to combine the base output and control
-          (default: +)
-        """
-
-        layers = model_layer_list(self.model)
-        for layer_id in self.layer_ids:
-            layer: ControlModule = layers[layer_id]  # type: ignore
-            if control is None:
-                layer.reset()
-            else:
-                layer.set_control(BlockControlParams(control[layer_id], **kwargs))
+    def _steer(self, fn: Callable, *args, **kwargs):
+        with self._make_trace():
+            return fn(*args, **kwargs)
 
     def forward(self, *args, **kwargs):
-        return self.model.forward(*args, **kwargs)
+        return self._steer(self.model.forward, *args, **kwargs)
 
     def generate(self, *args, **kwargs):
-        return self.model.generate(*args, **kwargs)
+        return self._steer(self.model.generate, *args, **kwargs)
 
     def __call__(self, *args, **kwargs):
-        return self.model(*args, **kwargs)
+        return self._steer(self.model.__call__, *args, **kwargs)
 
-
-@dataclasses.dataclass
-class BlockControlParams:
-    control: torch.Tensor | None = None
-    normalize: bool = False
-    operator: typing.Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = (
-        lambda current, control: current + control
-    )
-
-    @classmethod
-    def default(cls) -> "BlockControlParams":
-        return cls()
-
-
-class ControlModule(torch.nn.Module):
-    def __init__(self, block: torch.nn.Module) -> None:
-        super().__init__()
-        self.block: torch.nn.Module = block
-        self.params: BlockControlParams = BlockControlParams.default()
-        if hasattr(block, 'attention_type'):
-            self.attention_type = block.attention_type
-
-    def set_control(self, params: BlockControlParams) -> None:
-        self.params = params
-
-    def reset(self) -> None:
-        self.set_control(BlockControlParams.default())
-
-    def forward(self, *args, **kwargs):
-        output = self.block(*args, **kwargs)
-
-        control = self.params.control
-
-        if control is None:
-            return output
-        elif len(control.shape) == 1:
-            control = control.reshape(1, 1, -1)
-
-        if isinstance(output, tuple):
-            modified = output[0]
-        else:
-            modified = output
-
-        assert len(control.shape) == len(modified.shape)
-        control = control.to(modified.device)
-
-        norm_pre = torch.norm(modified, dim=-1, keepdim=True)
-
-        # we should ignore the padding tokens when doing the activation addition
-        # mask has ones for non padding tokens and zeros at padding tokens.
-        # if ('attention_mask' in kwargs) and (kwargs['attention_mask'] is not None):
-        #     mask = kwargs['attention_mask'].squeeze(0) # why 
-        # else:
-        mask = 1.0
-
-        modified = self.params.operator(modified, control * mask)
-
-        if self.params.normalize:
-            norm_post = torch.norm(modified, dim=-1, keepdim=True)
-            modified = modified / norm_post * norm_pre
-
-        if isinstance(output, tuple):
-            output = (modified,) + output[1:]
-        else:
-            output = modified
-
-        return output
-
-    def __getattr__(self, name: str) -> typing.Any:
-        if name in ("block", "params"):
-            # our properties - return normally
-            return super().__getattr__(name)
-        # delegate attr to wrapped module
-        return getattr(super().__getattr__("block"), name)
 
 
 def model_layer_list(model: ControlModel | PreTrainedModel) -> torch.nn.ModuleList:
@@ -222,3 +136,81 @@ def model_layer_list(model: ControlModel | PreTrainedModel) -> torch.nn.ModuleLi
     raise ValueError(
         f"don't know how to get layer list for {type(model)}! try assigning `model.repeng_layers = ...` to override this search."
     )
+
+
+def get_available_layers(model, regex_filter: Optional[str] = None, layer_range: Optional[Tuple[int, int]] = None) -> Tuple[List[str], List[str]]:
+    """Find available layers in a model for baukit-style hooking.
+
+    Usage:
+        # all blocks and lineaer layers
+        get_available_layers(model)
+        # get blocks
+        get_available_layers(model, regex_filter="\d+$")
+        # get k/v projections
+        get_available_layers(model, regex_filter="k_proj$")
+
+    k_proj
+    down_proj
+    
+    """
+
+    # linear layers
+    available_layers = [k.replace(".weight", "") for k, v in model.named_parameters()]
+
+    # parents/blocks
+    for l in available_layers:
+        while len(l) > 0:
+            l = ".".join(l.split(".")[:-1])
+            if l not in available_layers and l != "":
+                available_layers.append(l)
+
+    # filter by range
+    n_layers = len(model_layer_list(model))
+    if layer_range is not None:
+        # handle fractions
+        if all(isinstance(x, float) for x in layer_range):
+            layer_range = (int(layer_range[0] * n_layers), int(layer_range[1] * n_layers))
+
+        # handle negative
+        for i, n in enumerate(layer_range):
+            if n < 0:
+                layer_range[i] = n_layers + n
+
+        # filter to range
+        layer_range = list(range(*layer_range))
+        available_layers = [
+            s for s in available_layers if any(f".{i}." in s or s.endswith(f".{i}") for i in layer_range)
+        ]
+
+    if regex_filter is not None:
+        available_layers = [s for s in available_layers if re.search(regex_filter, s)]
+
+    # remove layer numbers
+    short_available_layers = sorted(
+        set(re.sub(r"\d+", "{N}", s) for s in available_layers)
+    )
+    return short_available_layers, available_layers
+
+
+@torch.no_grad()
+def baukit_dir_add_hook(
+    output: Float[Tensor, "... d_act"],
+    layer: str,
+    inputs,
+    directions: Dict[str, Float[Tensor, "d_act"]],
+):
+    """
+    edit layer output by adding, used in baukit
+    """
+    if isinstance(output, tuple):
+        modified = output[0]
+    else:
+        modified = output
+    direction = directions[layer].to(output.device)
+    modified = modified + direction
+    if isinstance(output, tuple):
+        output = (modified,) + output[1:]
+    else:
+        output = modified
+    return output
+
