@@ -12,6 +12,7 @@ from torch import nn, Tensor
 import torch.nn.functional as F
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 import tqdm
+import baukit.nethook as nethook
 
 from .control import ControlModel, model_layer_list
 
