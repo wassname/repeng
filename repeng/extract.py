@@ -18,7 +18,7 @@ from .control import ControlModel, model_layer_list
 from .dataset import DatasetEntry
 from .svd_steering import svd_steering
 from .fisher_steering import natural_gradient_steering
-
+from .losses import compute_reprpo_nll_margin_loss, compute_simpo_loss, compute_reprpo_loss, compute_cosine_loss, compute_kpo_loss
 
 
 
@@ -415,28 +415,6 @@ def read_representations(
     return directions
 
 
-def compute_simpo_loss(logp_pos, logp_neg):
-    """Compute the SimPO loss for a batch of positive and negative log probabilities.
-
-    Why do we use SimPO loss? Unlike DPO it's closer to our autoregressive steering use case, so the curvature of the loss landscape is more similar.
-
-    Args:
-        logp_pos: Log probabilities of the positive responses. Shape: (batch_size/2,)
-        logp_neg: Log probabilities of the negative responses. Shape: (batch_size/2,)
-    See 
-    - https://github.com/princeton-nlp/SimPO/blob/1b3e8f3528a23bce3da514a2dce8ea7490d4bc75/scripts/simpo_trainer.py#L560)
-    - https://github.com/princeton-nlp/SimPO/blob/1b3e8f3528a23bce3da514a2dce8ea7490d4bc75/scripts/simpo_config.py#L56
-    """
-    pi_logratios = logp_pos - logp_neg
-    gamma_beta_ratio = 0.25
-    beta = 2.0
-    label_smoothing = 0.0
-    logits = pi_logratios - gamma_beta_ratio
-    return (
-        -F.logsigmoid(beta * logits) * (1 - label_smoothing)
-        - F.logsigmoid(-beta * logits) * label_smoothing
-    ).mean()
-
 def _collect_activations_grads(
     model,
     tokenizer,
@@ -492,14 +470,21 @@ def _collect_activations_grads(
                 avg_logp_completion = (lprobs_for_inputs * label_mask).sum(-1) / label_mask.sum(-1)
 
                 logp_pos, logp_neg = avg_logp_completion[::2], avg_logp_completion[1::2]
+                # loss = compute_simpo_loss(logp_pos, logp_neg)
 
-                loss = compute_simpo_loss(logp_pos, logp_neg)
+
+                hs = outputs.hidden_states[-3] # get layer N-2, this is peak supressed neurons
+
+                # layer = layers_to_edit[-1] # get the last layer we are recording
+                # hs = ret[layer].output
+                hs_neg = hs[1::2, -1]
+                hs_pos = hs[::2, -1]
+                loss = compute_reprpo_nll_margin_loss(hs_pos=hs_pos, hs_neg=hs_neg, logp_pos=logp_pos, logp_neg=logp_neg)
                 loss.backward()
 
                 # get last non-padded token
                 seq_len = label_mask.shape[1]
                 last_valid_idx = seq_len - label_mask.flip(-1).to(torch.int64).cpu().argmax(dim=-1) - 1
-                # FIXME we are not computing loss on the last token so need to take 2nd to last?
 
                 # collect activation, grad, avg_logp_completion for each example in batch
                 for layer in layers_to_edit:
