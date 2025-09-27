@@ -259,4 +259,46 @@ for GLM 9B
 
 vd_steer: score 1.032
 fisher_steer_reg1: score 0.525
-fisher_steer_reg3: score 7.158 (valid 0.25)
+
+
+# Trying all layers notebooks/try_steering_different_layers_types.ipynb
+
+again
+
+| method                          |   slope |     r2 |   valid_frac |   p_value |   score |    min |    max |
+|:--------------------------------|--------:|-------:|-------------:|----------:|--------:|-------:|-------:|
+| up_proj_fisher_steer_reg2       |   17.92 |   0.78 |          1   |      0.05 |   13.99 | -15.5  |  28.87 |
+| .o_proj_fisher_steer_reg2       |   39.2  |   0.88 |          0.6 |      0.22 |   12.47 | -18.25 |  25.62 |
+| down_proj_fisher_steer_reg2     |   24.79 |   0.96 |          0.6 |      0.13 |    8.54 |  -1.25 |  26.5  |
+| gate_proj_fisher_steer_reg2     |    6.61 |   0.86 |          1   |      0.02 |    5.66 |   6    |  21.62 |
+| .q_proj_fisher_steer_reg3       |    9    |   0.62 |          1   |      0.12 |    5.54 |  -1.5  |  24.38 |
+| gate_proj_fisher_steer_reg3     |   10.15 |   0.84 |          0.8 |      0.08 |    5.48 |   6    |  23    |
+| .v_proj_svd_steer               |  -11.62 |   0.37 |          1   |      0.28 |    4.3  | -18    |  22.38 |
+| down_proj_fisher_steer_cov_reg1 |    3.66 |   0.92 |          1   |      0.01 |    3.36 |  13.25 |  22.5  |
+| .q_proj_fisher_steer_reg2       |    2.99 |   0.89 |          1   |      0.02 |    2.67 |  13.75 |  20.38 |
+| .k_proj_fisher_steer_reg2       |    3.58 |   0.71 |          1   |      0.07 |    2.55 |  10.75 |  20.5  |
+| .v_proj_pca_diff                |    2.13 |   0.81 |          1   |      0.04 |    1.73 |  15    |  20    |
+| .k_proj_fisher_steer_cov_reg1   |    1.9  |   0.82 |          1   |      0.03 |    1.57 |  15.75 |  20.62 |
+| .k_proj_svd_steer               |    2.21 |   0.54 |          1   |      0.16 |    1.19 |  12.75 |  19    |
+| .v_proj_fisher_steer_cov_reg1   |   -1.87 |   0.59 |          1   |      0.13 |    1.11 |  15.25 |  19.75 |
+| .q_proj_fisher_steer_cov_reg1   |    1.82 |   0.44 |          1   |      0.22 |    0.8  |  14.75 |  20.62 |
+| down_proj_pca_diff              |    0.77 |   0.96 |          1   |      0    |    0.74 |  16.75 |  18.5  |
+| .o_proj_pca_diff                |   -1.37 |   0.52 |          1   |      0.17 |    0.72 |  15.25 |  19.5  |
+| .k_proj_pca_diff                |    1.53 |   0.43 |          1   |      0.23 |    0.66 |  14    |  19    |
+| up_proj_pca_diff                |    0.77 |   0.68 |          1   |      0.09 |    0.53 |  17.25 |  19.25 |
+| .o_proj_fisher_steer_cov_reg1   |    1.12 |   0.43 |          1   |      0.23 |    0.48 |  16    |  19.88 |
+| .o_proj_svd_steer               |   -0.68 |   0.37 |          1   |      0.28 |    0.25 |  14.5  |  17    |
+| gate_proj_svd_steer             |   -0.87 |   0.23 |          1   |      0.42 |    0.2  |  15.25 |  19    |
+| .v_proj_fisher_steer_reg2       |    3.99 |   0.04 |          1   |      0.74 |    0.17 | -15.75 |  21.38 |
+| gate_proj_pca_diff              |    0.73 |   0.2  |          1   |      0.45 |    0.15 |  15    |  18.5  |
+| .q_proj_svd_steer               |   -0.43 |   0.22 |          1   |      0.43 |    0.09 |  18    |  20    |
+| .k_proj_fisher_steer_reg3       |    2.45 |   0.02 |          1   |      0.8  |    0.06 | -14.12 |  18.75 |
+| down_proj_svd_steer             |   -0.31 |   0.09 |          1   |      0.62 |    0.03 |  16.25 |  18.5  |
+| up_proj_svd_steer               |    0.31 |   0.06 |          1   |      0.68 |    0.02 |  16    |  18.75 |
+| up_proj_fisher_steer_cov_reg1   |   -0.32 |   0.03 |          1   |      0.77 |    0.01 |  16.5  |  19.62 |
+| gate_proj_fisher_steer_cov_reg1 |    0.14 |   0    |          1   |      0.92 |    0    |  14    |  18.25 |
+| .q_proj_pca_diff                |   -0.04 |   0    |          1   |      0.92 |    0    |  18    |  19.5  |
+| .v_proj_fisher_steer_reg3       |  nan    | nan    |          0.2 |    nan    |  nan    | nan    | nan    |
+| .o_proj_fisher_steer_reg3       |  nan    | nan    |          0.2 |    nan    |  nan    | nan    | nan    |
+| down_proj_fisher_steer_reg3     |  nan    | nan    |          0.2 |    nan    |  nan    | nan    | nan    |
+| up_proj_fisher_steer_reg3       |  nan    | nan    |          0.4 |    nan    |  nan    | nan    | nan    |
