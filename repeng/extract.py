@@ -2,7 +2,7 @@ import dataclasses
 import os
 import typing
 import warnings
-from typing import Literal, OrderedDict
+from typing import Callable, Literal, OrderedDict
 import gguf
 import numpy as np
 from sklearn.decomposition import PCA
@@ -18,7 +18,7 @@ from .control import ControlModel, model_layer_list
 from .dataset import DatasetEntry
 from .svd_steering import svd_steering
 from .fisher_steering import natural_gradient_steering
-from .losses import compute_reprpo_nll_margin_loss, compute_simpo_loss, compute_reprpo_loss, compute_cosine_loss, compute_kpo_loss
+from .losses import compute_reprpo_nll_margin_loss
 
 
 
@@ -328,7 +328,7 @@ def read_representations(
     act: dict[str, Tensor],
     logprobs: Tensor,
     grads: dict[str, Tensor | None],
-    method: typing.Literal["pca_diff", "pca_center", "umap", "pca_diff_weighted", "pca_center_weighted", "svd_gradient", "fisher_steer"] = "pca_diff",
+    method: typing.Literal["pca_diff", "pca_center", "umap", "pca_diff_weighted", "pca_center_weighted", "svd_gradient", "fisher_steer", "hvp_steer"] = "pca_diff",
 ) -> dict[str, np.ndarray]:
     
     hidden_layers= list(act.keys())
@@ -338,9 +338,9 @@ def read_representations(
     for layer in tqdm.tqdm(hidden_layers):
         h = act[layer].clone()
 
-        use_empirical_fim = True
+        fim = 'improved_empirical'
         if '_cov' in method:
-            use_empirical_fim = False
+            fim = 'covariance'
         
         grad_matrix = grads[layer].clone()
         
@@ -379,57 +379,97 @@ def read_representations(
                     grad_matrix, 
                     low_dim=low_dim,
                     lambda_reg=1e-0,
-                    use_empirical_fim=use_empirical_fim,
+                    fim=fim,
                 )
             elif '_reg1' in method:
                 directions[layer] = natural_gradient_steering(
                     grad_matrix, 
                     low_dim=low_dim,
                     lambda_reg=1e-1,
-                    use_empirical_fim=use_empirical_fim,
+                    fim=fim,
                 )
             elif '_reg2' in method:
                 directions[layer] = natural_gradient_steering(
                     grad_matrix, 
                     low_dim=low_dim,
                     lambda_reg=1e-2,
-                    use_empirical_fim=use_empirical_fim,
+                    fim=fim,
                 )
             elif '_reg3' in method:
                 directions[layer] = natural_gradient_steering(
                     grad_matrix, 
                     low_dim=low_dim,
                     lambda_reg=1e-3,
-                    use_empirical_fim=use_empirical_fim,
+                    fim=fim,
                 )
             elif '_reg4' in method:
                 directions[layer] = natural_gradient_steering(
                     grad_matrix, 
                     low_dim=low_dim,
                     lambda_reg=1e-4,
-                    use_empirical_fim=use_empirical_fim,
+                    fim=fim,
                 )
             elif '_reg5' in method:
                 directions[layer] = natural_gradient_steering(
                     grad_matrix, 
                     low_dim=low_dim,
                     lambda_reg=1e-5,
-                    use_empirical_fim=use_empirical_fim,
+                    fim=fim,
                 )
             else:
                 directions[layer] = natural_gradient_steering(
                     grad_matrix, 
                     low_dim=low_dim,
-                    use_empirical_fim=use_empirical_fim,
+                    fim=fim,
                 )
 
             # # make sure the direction has positive personas as +ve (otherwise flip)
             directions[layer] = _choose_sign_from_grads(directions[layer], grad_matrix)
 
+        elif method == "hvp_steer":
+            # Down-project for feasibility
+            low_dim = 128
+            if low_dim < dim:
+                rand_matrix = torch.randn(dim, low_dim, device=grad_matrix.device)
+                P, _ = torch.linalg.qr(rand_matrix, mode="reduced")
+                grad_proj = grad_matrix @ P  # [batch, low_dim]
+                mean_grad_proj = grad_proj.mean(0)  # [low_dim]
+            else:
+                P = torch.eye(dim, device=grad_matrix.device)
+                mean_grad_proj = mean_grad.mean(0)
+            
+            # Compute HVP: grad of (grad @ mean_grad_proj) w.r.t. inputs (finite diff approx for speed)
+            # Dummy forward: treat mean_grad_proj as vector, compute directional deriv
+            def compute_hvp(v, grads):
+                # Finite difference HVP approx: [grad(f(x + eps v)) - grad(f(x - eps v))] / (2 eps)
+                eps = 1e-4
+                # For simplicity, use autograd on a linear proxy: H ≈ 2 * F (from Fisher)
+                # Better: Use torch.autograd.grad for second-order
+                hvp = torch.autograd.grad(
+                    outputs=(grads @ v).sum(),
+                    inputs=grads,
+                    create_graph=True,
+                    retain_graph=True
+                )[0].mean(0)  # Average over batch
+                return hvp @ P.T if low_dim < dim else hvp  # Up-project
+            
+            direction = compute_hvp(mean_grad_proj, grad_matrix)
+            directions[layer] = _choose_sign_from_grads(direction, grad_matrix)
+
         else: # PCA-based methods
+            if 'weighted' in method:
+                # Normalize logprobs to [0, 2]: Higher prob = higher weight (focus on coherent samples)
+                # For pairs, use difference or average; here, weight by pos logprob (more honest = higher weight) 
+                pair_probs = logprobs.view(-1, 2).mean(1)  # Average logprob per pair [n_pairs]
+                weights = torch.softmax(pair_probs, dim=0) * 2.0  # [0, 2] range
+                weights = torch.clamp(weights, min=0.0)  # Non-negative
+                # Reshape to match train (interleave for pos/neg, but since train is diff, use pair weights)
+                weights = weights.repeat(2) if len(train) == len(logprobs) else weights  # Adjust shape
+            else:
+                weights = None
             # run PCA on difference vectors between positive and negative examples
             train = h[::2] - h[1::2]
-            directions[layer] = PCAWeighted(train)
+            directions[layer] = PCAWeighted(train, weights=weights)
 
             # make sure the direction has positive personas as +ve (otherwise flip)
             directions[layer] = choose_sign_from_hiddens(directions[layer], h)
@@ -495,21 +535,22 @@ def _collect_activations_grads(
                 avg_logp_completion = (lprobs_for_inputs * label_mask).sum(-1) / label_mask.sum(-1)
 
                 logp_pos, logp_neg = avg_logp_completion[::2], avg_logp_completion[1::2]
-                # loss = compute_simpo_loss(logp_pos, logp_neg)
-
 
                 hs = outputs.hidden_states[-3] # get layer N-2, this is peak [supressed neurons](https://github.com/wassname/eliciting_suppressed_knowledge?tab=readme-ov-file#relation-to-prior-work)
-
-                # layer = layers_to_edit[-1] # get the last layer we are recording
-                # hs = ret[layer].output
-                hs_neg = hs[1::2, -1]
-                hs_pos = hs[::2, -1]
-                loss = compute_reprpo_nll_margin_loss(hs_pos=hs_pos, hs_neg=hs_neg, logp_pos=logp_pos, logp_neg=logp_neg)
-                loss.backward()
 
                 # get last non-padded token
                 seq_len = label_mask.shape[1]
                 last_valid_idx = seq_len - label_mask.flip(-1).to(torch.int64).cpu().argmax(dim=-1) - 1
+
+                # layer = layers_to_edit[-1] # get the last layer we are recording
+                # hs = ret[layer].output
+                # FIXME choose last non padding, not last
+                hs_last = hs[range(len(last_valid_idx)), last_valid_idx]
+                hs_neg = hs_last[1::2]
+                hs_pos = hs_last[::2]
+                loss = compute_reprpo_nll_margin_loss(hs_pos=hs_pos, hs_neg=hs_neg, logp_pos=logp_pos, logp_neg=logp_neg)
+                loss.backward()
+
 
                 # collect activation, grad, avg_logp_completion for each example in batch
                 for layer in layers_to_edit:
@@ -549,3 +590,49 @@ def project_onto_direction(H, direction):
     mag = torch.linalg.norm(direction)
     assert not torch.isinf(mag)
     return (H @ direction) / mag
+
+
+# New classmethod for NG optimization approximation
+@classmethod
+def ng_optimize_step(cls, h_orig: Tensor, loss_fn: Callable, lambda_reg: float = 1.0, 
+                     directions: dict = None) -> Tensor:
+    """
+    Approximate solution to min_h ||h - h_orig||^2 + lambda * loss(h) via one NG step.
+    
+    In plain language: Find a new activation h that's close to the original h_orig, 
+    but also reduces the loss (e.g., makes the model more honest). This is like 
+    taking one optimization step toward better behavior while staying near the 
+    original trajectory. Uses natural gradient for curvature awareness.
+    
+    Args:
+        h_orig: Original activations [batch, dim]
+        loss_fn: Loss function (e.g., ReprPO on hs_pos/hs_neg)
+        lambda_reg: Tradeoff between staying close and reducing loss
+    Returns:
+        Optimized direction to add: h_opt - h_orig
+    """
+    # Dummy param for optimization
+    h_param = nn.Parameter(h_orig.clone().detach().requires_grad_(True))
+    
+    # Simple loss: distance + lambda * actual_loss
+    def total_loss():
+        dist_loss = F.mse_loss(h_param, h_orig)
+        # Split for pos/neg if needed; assume loss_fn takes h_param
+        concept_loss = loss_fn(h_param)  # e.g., ReprPO(h_pos, h_neg)
+        return dist_loss + lambda_reg * concept_loss
+    
+    # One NG step: precondition grad with FIM approx
+    optimizer = torch.optim.SGD([h_param], lr=1.0)  # Placeholder
+    h_param.grad = torch.autograd.grad(total_loss(), h_param, create_graph=True)[0]
+    
+    # FIM approx from gradients (reuse if available)
+    if directions:
+        F_approx = torch.eye(h_orig.shape[-1], device=h_orig.device)  # Simple diag
+        # Better: Use empirical F from prior grads
+        h_param.grad = torch.linalg.solve(F_approx + 0.01 * torch.eye(F_approx.shape[0]), h_param.grad)
+    
+    # Apply step
+    with torch.no_grad():
+        h_param.add_(h_param.grad, alpha=-0.1)  # Small LR
+        direction = h_param - h_orig
+        return direction.detach()

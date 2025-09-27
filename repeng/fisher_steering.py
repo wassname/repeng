@@ -3,7 +3,7 @@ import numpy as np
 from torch.linalg import solve, qr
 from jaxtyping import Float
 from torch import Tensor
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Literal
 import tqdm
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
@@ -13,7 +13,7 @@ from .control import ControlModel
 def natural_gradient_steering(
     grad_matrix: Float[Tensor, "batch dim"],  # gradients from SimPO loss
     lambda_reg: Optional[float] = 1e-2,  # regularization for Fisher inversion
-    use_empirical_fim: bool = True,
+    fim: Literal["empirical", "improved_empirical", "covariance"] = "improved_empirical",  # which FIM approximation
     low_dim: int | None = None,  # if set, project to random subspace of this dim
     seed: int | None = 42,  # for reproducible random projection
 ) -> Float[Tensor, "dim"]:
@@ -24,7 +24,7 @@ def natural_gradient_steering(
     Args:
         grad_matrix: Gradients from SimPO loss, shape (batch, dim)
         lambda_reg: Regularization for Fisher matrix inversion
-        use_empirical_fim: If True, use empirical FIM from gradients; else covariance
+        fim: Which FIM approximation to use ("empirical" or "covariance")
         low_dim: If set and < dim, project to random orthonormal subspace
         seed: Seed for random projection; None for non-reproducible
     
@@ -56,13 +56,32 @@ def natural_gradient_steering(
     # Mean gradient direction (what we want to steer towards)
     mean_grad = grad_matrix.mean(dim=0)  # [dim]
     
-    if use_empirical_fim:
-        # Empirical Fisher: F ≈ (1/n) Σ g_i g_i^T
-        F_matrix = torch.einsum('bi,bj->ij', grad_matrix, grad_matrix) / batch_size
-    else:
-        # Alternative: covariance of centered gradients
-        centered_grads = grad_matrix - mean_grad.unsqueeze(0)
-        F_matrix = torch.einsum('bi,bj->ij', centered_grads, centered_grads) / (batch_size - 1)
+    match fim:
+        case "empirical":
+            # Empirical Fisher (EF): F ≈ (1/n) Σ g_i g_i^T
+            # This is the second moment matrix of the gradients.
+            # See Wu et al. (2024) https://arxiv.org/abs/2406.06420 for a discussion
+            # of its limitations (inversely-scaled projection issue).
+            F_matrix = torch.einsum('bi,bj->ij', grad_matrix, grad_matrix) / batch_size
+        case "improved_empirical":
+            # Improved Empirical Fisher (iEF) from Wu et al. (2024).
+            # F_iEF = Σ_n (1 / ||∇_z(l_n)||^2) * g_n * g_n^T
+            # This rescales each sample's contribution by its logit gradient norm
+            # to address the EF's inversely-scaled projection issue.
+            if logit_grad_norms is None:
+                raise ValueError("logit_grad_norms must be provided when use_ief is True.")
+            # Add a small epsilon to prevent division by zero for converged samples.
+            weights = 1.0 / (logit_grad_norms.pow(2) + 1e-8)
+            weighted_grads = grad_matrix * weights.unsqueeze(-1)
+            F_matrix = torch.einsum('bi,bj->ij', weighted_grads, grad_matrix) / batch_size
+        case "covariance":
+            # Covariance of gradients: F ≈ Cov(g) = E[(g - E[g])(g - E[g])^T]
+            # This is the Fisher for a Gaussian model, but an approximation otherwise.
+            centered_grads = grad_matrix - mean_grad.unsqueeze(0)
+            # Use n-1 for unbiased sample covariance estimate
+            F_matrix = torch.einsum('bi,bj->ij', centered_grads, centered_grads) / (batch_size - 1)
+        case _:
+            raise ValueError(f"Unknown fim type: {fim}")
 
     # # HACK: Adaptive regularization based on trace (average eigenvalue)
     # if lambda_reg is None:
