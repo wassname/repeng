@@ -9,6 +9,8 @@ from collections import OrderedDict
 from baukit import TraceDict
 import torch
 from torch import Tensor, nn
+
+import contextlib
 from transformers import PretrainedConfig, PreTrainedModel
 
 if TYPE_CHECKING:
@@ -146,18 +148,22 @@ def model_layer_list(model: ControlModel | PreTrainedModel) -> torch.nn.ModuleLi
 
 
 def get_available_layers(model, regex_filter: Optional[str] = None, layer_range: Optional[Tuple[int, int]] = None) -> Tuple[List[str], List[str]]:
-    """Find available layers in a model for baukit-style hooking.
+    """Find available layers in a model using named_parameters style paths
 
     Usage:
-        # all blocks and lineaer layers
-        get_available_layers(model)
-        # get blocks
-        get_available_layers(model, regex_filter="\d+$")
-        # get k/v projections
-        get_available_layers(model, regex_filter="k_proj$")
+        ```
+        # all blocks and layers with weights
+        get_available_layers(model, layer_range=(0.1, 0.9))
+        # get hidden states from layer 10% to 90%
+        get_available_layers(model, regex_filter="\d+$", layer_range=(0.1, 0.9))
+        # ['model.layers.10', 'model.layers.11',...]
+        # get k projections from layer 10 to 20
+        get_available_layers(model, regex_filter="k_proj$", layer_range=(10, 20))
+        ```
 
-    k_proj
-    down_proj
+    Outputs:
+        - short names with layer numbers replaced by {N}, e.g. `['model.layers.{N}.k_proj', ...]`
+        - full names with layer numbers, e.g. `['model.layers.10.k_proj', 'model.layers.11',...]`
     
     """
 
@@ -221,4 +227,31 @@ def baukit_dir_add_hook(
     else:
         output = modified
     return output
+
+
+
+@contextlib.contextmanager
+def steer(model: 'PreTrainedModel', vector: "ControlVector", coeff: float):
+    """
+    Usage:
+        with steer(model, vector, coeff):
+            out = model.generate()
+    """
+    if isinstance(model, ControlModel):
+        model = model.model
+    layers=list(vector.directions.keys())
+    if coeff==0:
+        edit_fn = noop_edit
+    else:
+        edit_fn = functools.partial(
+            baukit_dir_add_hook, directions=vector.directions, coeff=coeff
+        )
+    with TraceDict(
+        model, 
+        layers=layers,
+        retain_output=False,
+        detach=True,
+        edit_output=edit_fn,
+    ) as td:
+        yield model
 

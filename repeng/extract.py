@@ -286,6 +286,44 @@ class ComputeHiddens(typing.Protocol):
     ) -> dict[str, np.ndarray]: ...
 
 
+
+def _choose_sign_from_grads(direction: torch.Tensor, grad_matrix: torch.Tensor) -> torch.Tensor:
+    """
+    Fix direction sign using first-order loss change.
+    We want +v on positives and -v on negatives to reduce loss:
+      mean((g_neg - g_pos) @ v) >= 0
+    If the mean is negative, flip v.
+    """
+    v = direction
+    g_pos = grad_matrix[::2]   # [n/2, d]
+    g_neg = grad_matrix[1::2]  # [n/2, d]
+    score = torch.mean((g_neg - g_pos) @ v)
+    if torch.isnan(score):
+        return v  # keep as-is if degenerate
+    return v if score >= 0 else -v
+
+def choose_sign_from_hiddens(direction: torch.Tensor, hiddens: torch.Tensor) -> torch.Tensor:
+    projected_hiddens = project_onto_direction(hiddens, direction)
+    len_inputs = projected_hiddens.shape[0]//2
+
+    # order is [positive, negative, positive, negative, ...]
+    positive_smaller_mean = torch.tensor(
+        [
+            projected_hiddens[i] < projected_hiddens[i + 1]
+            for i in range(0, len_inputs * 2, 2)
+        ]
+    ).float().mean()
+    positive_larger_mean = torch.tensor(
+        [
+            projected_hiddens[i] > projected_hiddens[i + 1]
+            for i in range(0, len_inputs * 2, 2)
+        ]
+    ).float().mean()
+
+    if positive_smaller_mean > positive_larger_mean:  # type: ignore
+        return -direction
+    return direction
+
 def read_representations(
     act: dict[str, Tensor],
     logprobs: Tensor,
@@ -294,7 +332,6 @@ def read_representations(
 ) -> dict[str, np.ndarray]:
     
     hidden_layers= list(act.keys())
-    len_inputs = logprobs.shape[0]//2
 
     # B. Compute directions
     directions: OrderedDict[str, torch.Tensor] = OrderedDict()
@@ -386,26 +423,8 @@ def read_representations(
                     use_empirical_fim=use_empirical_fim,
                 )
 
-            # make sure the direction has positive personas as +ve (otherwise flip)
-            # calculate sign
-            projected_hiddens = project_onto_direction(grad_matrix, directions[layer])
-
-            # order is [positive, negative, positive, negative, ...]
-            positive_smaller_mean = torch.tensor(
-                [
-                    projected_hiddens[i] < projected_hiddens[i + 1]
-                    for i in range(0, len_inputs * 2, 2)
-                ]
-            ).float().mean()
-            positive_larger_mean = torch.tensor(
-                [
-                    projected_hiddens[i] > projected_hiddens[i + 1]
-                    for i in range(0, len_inputs * 2, 2)
-                ]
-            ).float().mean()
-
-            if positive_smaller_mean > positive_larger_mean:  # type: ignore
-                directions[layer] *= -1
+            # # make sure the direction has positive personas as +ve (otherwise flip)
+            directions[layer] = _choose_sign_from_grads(directions[layer], grad_matrix)
 
         else: # PCA-based methods
             # run PCA on difference vectors between positive and negative examples
@@ -413,25 +432,7 @@ def read_representations(
             directions[layer] = PCAWeighted(train)
 
             # make sure the direction has positive personas as +ve (otherwise flip)
-            # calculate sign
-            projected_hiddens = project_onto_direction(h, directions[layer])
-
-            # order is [positive, negative, positive, negative, ...]
-            positive_smaller_mean = torch.tensor(
-                [
-                    projected_hiddens[i] < projected_hiddens[i + 1]
-                    for i in range(0, len_inputs * 2, 2)
-                ]
-            ).float().mean()
-            positive_larger_mean = torch.tensor(
-                [
-                    projected_hiddens[i] > projected_hiddens[i + 1]
-                    for i in range(0, len_inputs * 2, 2)
-                ]
-            ).float().mean()
-
-            if positive_smaller_mean > positive_larger_mean:  # type: ignore
-                directions[layer] *= -1
+            directions[layer] = choose_sign_from_hiddens(directions[layer], h)
 
     return directions
 
@@ -457,13 +458,16 @@ def _collect_activations_grads(
         encoded_batch = tokenizer(batch, padding=True, return_tensors="pt", padding_side="left").to(model.device)
         attention_mask = encoded_batch["attention_mask"]
 
-        # We don't need gradients wrt model parameters, so turn them off.
-        for param in model.parameters():
-            param.requires_grad = False
+        model.eval()
+        # Disable ALL parameter grads to save memory, we only need grads on activations
+        for p in model.parameters():
+            p.requires_grad_(False)
+            p.grad = None
 
-        # But we need to enable them for the embedding layer to build the graph.
-        embedding_layer = model.get_input_embeddings()
-        embedding_layer.weight.requires_grad = True
+        # Ensure the graph is built even with frozen params
+        model.enable_input_require_grads()
+        # embedding_layer = model.get_input_embeddings()
+        # embedding_layer.weight.requires_grad = True
 
 
         # We need to enable gradients for the DPO loss calculation.
@@ -494,7 +498,7 @@ def _collect_activations_grads(
                 # loss = compute_simpo_loss(logp_pos, logp_neg)
 
 
-                hs = outputs.hidden_states[-3] # get layer N-2, this is peak supressed neurons
+                hs = outputs.hidden_states[-3] # get layer N-2, this is peak [supressed neurons](https://github.com/wassname/eliciting_suppressed_knowledge?tab=readme-ov-file#relation-to-prior-work)
 
                 # layer = layers_to_edit[-1] # get the last layer we are recording
                 # hs = ret[layer].output
@@ -528,10 +532,6 @@ def _collect_activations_grads(
         del outputs, loss, lprobs, lprobs_for_inputs, avg_logp_completion, ret, grad, hs
         model.zero_grad()
         torch.cuda.empty_cache()
-
-    # Restore requires_grad for model parameters
-    for param in model.parameters():
-        param.requires_grad = True
 
     # stack layers
     final_grads = {k: torch.vstack(v) if v else None for k, v in gradients.items()}

@@ -198,3 +198,65 @@ with longer token limits (as some steering was making it think for a long time)
 
 TODO the direction finding thing should more like use a forward pass to work out the direction
 TODO try larger model, get it working with bitsand bytes
+
+
+
+this is using the new loss, and k_proj on Qwen 4 Instruct... it doesn't help much
+
+k_proj max score 1.42
+
+| method                |   slope |   r2 |   valid_frac |   effect_size |   p_value |   score |    min |   max |
+|:----------------------|--------:|-----:|-------------:|--------------:|----------:|--------:|-------:|------:|
+| fisher_steer_cov_reg1 |   -1.68 | 0.85 |          1   |           nan |      0.03 |    1.42 |  16    | 20    |
+| fisher_steer_reg2     |   -1.72 | 0.43 |          1   |           nan |      0.23 |    0.74 |  11    | 17    |
+| svd_steer             |   -1.53 | 0.41 |          1   |           nan |      0.24 |    0.63 |  15.5  | 20.75 |
+| fisher_steer_reg4     |    7.86 | 0.11 |          0.8 |           nan |      0.67 |    0.54 | -23.37 | 16    |
+| fisher_steer_dual     |   -1.23 | 0.29 |          1   |           nan |      0.35 |    0.35 |  14.75 | 19.75 |
+| pca_diff              |   -0.76 | 0.3  |          1   |           nan |      0.34 |    0.23 |  16.5  | 19.25 |
+| fisher_steer_cov_reg3 |   -0.1  | 0    |          1   |           nan |      0.99 |    0    | -13.25 | 18.5  |
+
+
+v_proj max score  0.59
+
+| method                |   slope |     r2 |   valid_frac |   effect_size |   p_value |   score |    min |   max |
+|:----------------------|--------:|-------:|-------------:|--------------:|----------:|--------:|-------:|------:|
+| pca_diff              |    0.95 |   0.62 |          1   |           nan |      0.11 |    0.59 |  16.75 |  19.5 |
+| svd_steer             |    1.26 |   0.4  |          1   |           nan |      0.25 |    0.51 |  15.75 |  20   |
+| fisher_steer_reg2     |    3.96 |   0.15 |          0.8 |           nan |      0.62 |    0.37 |   2.78 |  19   |
+| fisher_steer_cov_reg1 |    1.19 |   0.27 |          1   |           nan |      0.37 |    0.32 |  15.25 |  20.5 |
+| fisher_steer_dual     |   -0.54 |   0.01 |          0.8 |           nan |      0.9  |    0    |  10.5  |  18   |
+| fisher_steer_reg4     |  nan    | nan    |          0.2 |           nan |    nan    |  nan    | nan    | nan   |
+| fisher_steer_cov_reg3 |  nan    | nan    |          0.2 |           nan |    nan    |  nan    | nan    | nan   |
+
+I would also like to try other layers
+
+    'model.layers.{N}',
+    'model.layers.{N}.mlp',
+    'model.layers.{N}.mlp.down_proj',
+    'model.layers.{N}.mlp.gate_proj',
+    'model.layers.{N}.mlp.up_proj',
+    'model.layers.{N}.self_attn.k_proj',
+    'model.layers.{N}.self_attn.o_proj',
+    'model.layers.{N}.self_attn.q_proj',
+    'model.layers.{N}.self_attn.v_proj',
+
+I've tried down_proj, k_proj, v_proj. Given the transformer architecture, I think 
+
+
+    Try o_proj and q_proj next. o_proj writes directly to the residual; edits there tend to couple cleanly to logits. q_proj changes attention logits (focus), so it can be strong but noisier if your steer dir is not aligned to key-space features. down_proj is also good because it is the MLP write to residual. gate/up can work but are more nonlinear/saturated.
+    For attention: q affects who you look at, k affects who gets looked at, v affects what you read out. If you want controllable behavior on outputs, o_proj/down_proj usually give more monotone dose-response than k/v. Your k and v results match that expectation.
+
+- k_proj max score 1.42
+- v_proj max score  0.59
+- o_proj max score  
+- q_proj max score  
+- down_proj
+- up_proj
+
+
+
+for GLM 9B
+
+vd_steer: score 1.032
+fisher_steer_reg1: score 0.525
+fisher_steer_reg3: score 7.158 (valid 0.25)
