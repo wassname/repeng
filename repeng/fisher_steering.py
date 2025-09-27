@@ -16,6 +16,7 @@ def natural_gradient_steering(
     fim: Literal["empirical", "improved_empirical", "covariance"] = "improved_empirical",  # which FIM approximation
     low_dim: int | None = None,  # if set, project to random subspace of this dim
     seed: int | None = 42,  # for reproducible random projection
+    grad_norms: Optional[Float[Tensor, "batch"]] = None,  # ||∇_{loss_input} l_n||² per-sample, required for iEF
 ) -> Float[Tensor, "dim"]:
     """
     Computes natural gradient steering vector using Fisher preconditioning.
@@ -24,9 +25,10 @@ def natural_gradient_steering(
     Args:
         grad_matrix: Gradients from SimPO loss, shape (batch, dim)
         lambda_reg: Regularization for Fisher matrix inversion
-        fim: Which FIM approximation to use ("empirical" or "covariance")
+        fim: Which FIM approximation to use ("empirical", "improved_empirical", or "covariance")
         low_dim: If set and < dim, project to random orthonormal subspace
         seed: Seed for random projection; None for non-reproducible
+        grad_norms: Per-sample loss-input gradient norms ||∇_{loss_input} l_n||². Required when fim=="improved_empirical".
     
     Returns:
         Natural gradient steering vector
@@ -41,6 +43,7 @@ def natural_gradient_steering(
     #         print(f"FIXME: Auto-setting low_dim={low_dim} for n={batch_size}, d={dim}")
     
     
+    used_projection = False
     if low_dim and low_dim < dim:
         if seed is not None:
             torch.manual_seed(seed)
@@ -52,9 +55,11 @@ def natural_gradient_steering(
         # Project gradients to subspace
         grad_matrix = grad_matrix @ P  # [batch, low_dim]
         dim = low_dim  # update for below
+        used_projection = True
     
     # Mean gradient direction (what we want to steer towards)
     mean_grad = grad_matrix.mean(dim=0)  # [dim]
+    mean_grad_norm = torch.norm(mean_grad)  # scalar - for magnitude rescaling
     
     match fim:
         case "empirical":
@@ -65,13 +70,13 @@ def natural_gradient_steering(
             F_matrix = torch.einsum('bi,bj->ij', grad_matrix, grad_matrix) / batch_size
         case "improved_empirical":
             # Improved Empirical Fisher (iEF) from Wu et al. (2024).
-            # F_iEF = Σ_n (1 / ||∇_z(l_n)||^2) * g_n * g_n^T
-            # This rescales each sample's contribution by its logit gradient norm
+            # F_iEF = Σ_n (1 / ||∇_{loss_input}(l_n)||²) * g_n * g_n^T
+            # This rescales each sample's contribution by its loss-input gradient norm
             # to address the EF's inversely-scaled projection issue.
-            if logit_grad_norms is None:
-                raise ValueError("logit_grad_norms must be provided when use_ief is True.")
+            assert grad_norms is not None, "grad_norms must be provided when fim='improved_empirical'."
+            assert grad_norms.shape[0] == batch_size, f"grad_norms shape mismatch: expected ({batch_size},), got {tuple(grad_norms.shape)}"
             # Add a small epsilon to prevent division by zero for converged samples.
-            weights = 1.0 / (logit_grad_norms.pow(2) + 1e-8)
+            weights = 1.0 / (grad_norms.to(device).float() + 1e-8)  # grad_norms already squared
             weighted_grads = grad_matrix * weights.unsqueeze(-1)
             F_matrix = torch.einsum('bi,bj->ij', weighted_grads, grad_matrix) / batch_size
         case "covariance":
@@ -79,7 +84,8 @@ def natural_gradient_steering(
             # This is the Fisher for a Gaussian model, but an approximation otherwise.
             centered_grads = grad_matrix - mean_grad.unsqueeze(0)
             # Use n-1 for unbiased sample covariance estimate
-            F_matrix = torch.einsum('bi,bj->ij', centered_grads, centered_grads) / (batch_size - 1)
+            denom = max(batch_size - 1, 1)
+            F_matrix = torch.einsum('bi,bj->ij', centered_grads, centered_grads) / denom
         case _:
             raise ValueError(f"Unknown fim type: {fim}")
 
@@ -97,7 +103,13 @@ def natural_gradient_steering(
     # Natural gradient: θ_natural = F^(-1) * ∇L
     v_natural = solve(F_reg, mean_grad)
     
-    if low_dim:
+    # Magnitude rescaling: preserve steering strength proportional to objective signal
+    # Rescale by ||mean_grad|| to maintain proportionality to the objective gradient magnitude
+    v_natural_norm = torch.norm(v_natural)
+    if v_natural_norm > 1e-8:
+        v_natural = v_natural * (mean_grad_norm / v_natural_norm)
+    
+    if used_projection:
         # HACK: Scale correction for low-dim projection
         # Preserve gradient magnitude scale
         orig_grad_norm = torch.norm(mean_grad)
