@@ -45,7 +45,7 @@ _, hidden_layers = get_available_layers(model, regex_filter=".layers.\d+$", laye
 
 # train the vector with gradient-based method—takes less than a minute!
 honest_vector = ControlVector.train(
-    model, tokenizer, honest_dataset, 
+    model, tokenizer, honest_dataset,
     hidden_layers=hidden_layers,
     method="fisher_steer_cov_reg1"  # best performing method
 )
@@ -77,13 +77,13 @@ for strength in (-2.0, 0, 2.0):
     print()
 ```
 
-> strength=-2.2  
+> strength=-2.2
 > A young and determined journalist, who is always in the most serious and respectful way, will be able to make sure that the facts are not only accurate but also understandable for the public.
 >
-> strength=1  
+> strength=1
 > "Our TV show is a wild ride through a world of vibrant colors, mesmerizing patterns, and psychedelic adventures that will transport you to a realm beyond your wildest dreams."
 >
-> strength=2.2  
+> strength=2.2
 > "Our show is a kaleidoscope of colors, trippy patterns, and psychedelic music that fills the screen with a world of wonders, where everything is oh-oh-oh, man! ��psy����������oodle����psy��oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
 
 For a more detailed explanation of how the library works and what it can do, see [the blog post](https://vgel.me/posts/representation-engineering).
@@ -120,6 +120,15 @@ This branch explores gradient-informed steering for concepts like honesty/reason
 - Benchmarks: Composite score prioritizes slope/validity; p-values often low (significant).
 
 For full details, see notebooks (e.g., performance_tests_reprpo_layers.ipynb) and research_journal_mjc.md.
+
+### Custom ReprPO Loss Details
+The loss in `losses.py` (e.g., `compute_reprpo_nll_margin_loss`) is designed for one-step gradient/curvature sampling on paired pos/neg examples, not full training. It combines:
+- **Separation Term**: Maximizes the L2 norm of (positive - negative) hidden state differences to isolate the target concept.
+- **Coherence Margin**: Defines a bounded region where the NLL of the preferred (positive) completion is no worse than a baseline (detached average logprob of positive labels). Deviations outside this region are penalized quadratically. A 0.99 scaling on the baseline positions the computation just inside the boundary, ensuring both terms contribute to gradients.
+
+This creates steeper, more informative gradients for steering, inspired by SimPO/DPO margins but focused on internal state coherence rather than direct pos/neg comparison.
+
+See also the repo for training with losses like this https://github.com/wassname/repr-preference-optimization
 
 ## Notice
 

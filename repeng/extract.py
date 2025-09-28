@@ -256,7 +256,7 @@ def PCAWeighted(train, weights=None):
     https://stats.stackexchange.com/questions/113485/weighted-principal-components-analysis\
     """
     if weights is not None:
-        weights_flat = weights.flatten()
+        weights_flat = weights.flatten().clone()
         # Normalize weights to sum to 1
         weights_norm = weights_flat / weights_flat.sum()
     else:
@@ -344,121 +344,123 @@ def read_representations(
         fim = 'improved_empirical'
         if '_cov' in method:
             fim = 'covariance'
-        
-    grad_matrix = grads[layer].clone()
-    dim = grad_matrix.shape[-1]
-    
-    if method == "svd_gradient":
-        # For concept extraction, flip negative gradients
-        # grad_matrix[1::2] *= -1  # Now all gradients point "toward honesty" 
-        directions[layer] = svd_steering(grad_matrix)
-
-        # TODO importance sampling from logprobs
-    
-    elif "fisher_steer" in method:
-        low_dim=None
-
-
-
-        lambda_reg = 1e-2
-        if '_reg0' in method:
-            lambda_reg = 0.0
-        elif '_reg1' in method:
-            lambda_reg = 1e-1
-        elif '_reg2' in method:
-            lambda_reg = 1e-2
-        elif '_reg3' in method:
-            lambda_reg = 1e-3
-        elif '_reg4' in method:
-            lambda_reg = 1e-4
-        elif '_reg5' in method:
-            lambda_reg = 1e-5
-
-        if '_dual' in method:
-            # Separate Fisher for pos/neg
-            grad_pos = grad_matrix[::2]   # [n/2, dim]
-            grad_neg = grad_matrix[1::2]  # [n/2, dim]
-            if feat_grad_norms is not None and feat_grad_norms[layer] is not None:
-                norms_pos = feat_grad_norms[layer][::2]
-                norms_neg = feat_grad_norms[layer][1::2]
-            else:
-                norms_pos = norms_neg = None
+        elif "_emp" in method:
+            fim = 'empirical'
             
-            # Two natural gradients
-            low_dim = None
-            v_pos = natural_gradient_steering(grad_pos, low_dim=low_dim, fim=fim, grad_norms=norms_pos)
-            v_neg = natural_gradient_steering(grad_neg, low_dim=low_dim, fim=fim, grad_norms=norms_neg)
+        grad_matrix = grads[layer].clone()
+        dim = grad_matrix.shape[-1]
+        
+        if method == "svd_gradient":
+            # For concept extraction, flip negative gradients
+            # grad_matrix[1::2] *= -1  # Now all gradients point "toward honesty" 
+            directions[layer] = svd_steering(grad_matrix)
 
-            if '_pos' in method:
-                directions[layer] = v_pos
-            elif '_neg' in method:
-                directions[layer] = v_neg
-            elif '_diff' in method:
-                # Difference: pos - neg
-                directions[layer] = v_pos - v_neg
+            # TODO importance sampling from logprobs
+        
+        elif "fisher_steer" in method:
+            low_dim=None
+
+
+
+            lambda_reg = 1e-2
+            if '_reg0' in method:
+                lambda_reg = 0.0
+            elif '_reg1' in method:
+                lambda_reg = 1e-1
+            elif '_reg2' in method:
+                lambda_reg = 1e-2
+            elif '_reg3' in method:
+                lambda_reg = 1e-3
+            elif '_reg4' in method:
+                lambda_reg = 1e-4
+            elif '_reg5' in method:
+                lambda_reg = 1e-5
+
+            if '_dual' in method:
+                # Separate Fisher for pos/neg
+                grad_pos = grad_matrix[::2]   # [n/2, dim]
+                grad_neg = grad_matrix[1::2]  # [n/2, dim]
+                if feat_grad_norms is not None and feat_grad_norms[layer] is not None:
+                    norms_pos = feat_grad_norms[layer][::2]
+                    norms_neg = feat_grad_norms[layer][1::2]
+                else:
+                    norms_pos = norms_neg = None
+                
+                # Two natural gradients
+                low_dim = None
+                v_pos = natural_gradient_steering(grad_pos, low_dim=low_dim, fim=fim, grad_norms=norms_pos)
+                v_neg = natural_gradient_steering(grad_neg, low_dim=low_dim, fim=fim, grad_norms=norms_neg)
+
+                if '_pos' in method:
+                    directions[layer] = v_pos
+                elif '_neg' in method:
+                    directions[layer] = v_neg
+                elif '_diff' in method:
+                    # Difference: pos - neg
+                    directions[layer] = v_pos - v_neg
+                else:
+                    # Combine: pos direction and neg direction
+                    directions[layer] = (v_pos + v_neg) / 2.0
             else:
-                # Combine: pos direction and neg direction
-                directions[layer] = (v_pos + v_neg) / 2.0
-        else:
-            directions[layer] = natural_gradient_steering(
-                grad_matrix,
-                low_dim=low_dim,
-                fim=fim,
-                grad_norms=feat_grad_norms[layer] if feat_grad_norms else None,
-                lambda_reg=lambda_reg,
-            )
+                directions[layer] = natural_gradient_steering(
+                    grad_matrix,
+                    low_dim=low_dim,
+                    fim=fim,
+                    grad_norms=feat_grad_norms[layer] if feat_grad_norms else None,
+                    lambda_reg=lambda_reg,
+                )
 
-        # # make sure the direction has positive personas as +ve (otherwise flip)
-        directions[layer] = _choose_sign_from_grads(directions[layer], grad_matrix)
+            # # make sure the direction has positive personas as +ve (otherwise flip)
+            directions[layer] = _choose_sign_from_grads(directions[layer], grad_matrix)
 
-    elif method == "hvp_steer":
-        # Down-project for feasibility
-        low_dim = 128
-        if low_dim < dim:
-            rand_matrix = torch.randn(dim, low_dim, device=grad_matrix.device)
-            P, _ = torch.linalg.qr(rand_matrix, mode="reduced")
-            grad_proj = grad_matrix @ P  # [batch, low_dim]
-            mean_grad_proj = grad_proj.mean(0)  # [low_dim]
-        else:
-            P = torch.eye(dim, device=grad_matrix.device)
-            mean_grad_proj = grad_matrix.mean(0)
-        
-        # Compute HVP: grad of (grad @ mean_grad_proj) w.r.t. inputs (finite diff approx for speed)
-        # Dummy forward: treat mean_grad_proj as vector, compute directional deriv
-        def compute_hvp(v, grads):
-            # Finite difference HVP approx: [grad(f(x + eps v)) - grad(f(x - eps v))] / (2 eps)
-            eps = 1e-4
-            # For simplicity, use autograd on a linear proxy: H ≈ 2 * F (from Fisher)
-            # Better: Use torch.autograd.grad for second-order
-            hvp = torch.autograd.grad(
-                outputs=(grads @ v).sum(),
-                inputs=grads,
-                create_graph=True,
-                retain_graph=True
-            )[0].mean(0)  # Average over batch
-            return hvp @ P.T if low_dim < dim else hvp  # Up-project
-        
-        direction = compute_hvp(mean_grad_proj, grad_matrix)
-        directions[layer] = _choose_sign_from_grads(direction, grad_matrix)
+        elif method == "hvp_steer":
+            # Down-project for feasibility
+            low_dim = 128
+            if low_dim < dim:
+                rand_matrix = torch.randn(dim, low_dim, device=grad_matrix.device)
+                P, _ = torch.linalg.qr(rand_matrix, mode="reduced")
+                grad_proj = grad_matrix @ P  # [batch, low_dim]
+                mean_grad_proj = grad_proj.mean(0)  # [low_dim]
+            else:
+                P = torch.eye(dim, device=grad_matrix.device)
+                mean_grad_proj = grad_matrix.mean(0)
+            
+            # Compute HVP: grad of (grad @ mean_grad_proj) w.r.t. inputs (finite diff approx for speed)
+            # Dummy forward: treat mean_grad_proj as vector, compute directional deriv
+            def compute_hvp(v, grads):
+                # Finite difference HVP approx: [grad(f(x + eps v)) - grad(f(x - eps v))] / (2 eps)
+                eps = 1e-4
+                # For simplicity, use autograd on a linear proxy: H ≈ 2 * F (from Fisher)
+                # Better: Use torch.autograd.grad for second-order
+                hvp = torch.autograd.grad(
+                    outputs=(grads @ v).sum(),
+                    inputs=grads,
+                    create_graph=True,
+                    retain_graph=True
+                )[0].mean(0)  # Average over batch
+                return hvp @ P.T if low_dim < dim else hvp  # Up-project
+            
+            direction = compute_hvp(mean_grad_proj, grad_matrix)
+            directions[layer] = _choose_sign_from_grads(direction, grad_matrix)
 
-    else: # PCA-based methods
-        if 'weighted' in method:
-            # Normalize logprobs to [0, 2]: Higher prob = higher weight (focus on coherent samples)
-            # For pairs, use difference or average; here, weight by pos logprob (more honest = higher weight) 
-            pair_probs = logprobs.view(-1, 2).mean(1)  # Average logprob per pair [n_pairs]
-            weights = torch.softmax(pair_probs, dim=0) * 2.0  # [0, 2] range
-            weights = torch.clamp(weights, min=0.0)  # Non-negative
-            # Reshape to match train (interleave for pos/neg, but since train is diff, use pair weights)
-            # train will be defined below; just repeat to match pairwise diffs length
-            # weights used with train = h[::2] - h[1::2], so shapes match (n_pairs,)
-        else:
-            weights = None
-        # run PCA on difference vectors between positive and negative examples
-        train = h[::2] - h[1::2]
-        directions[layer] = PCAWeighted(train, weights=weights)
+        else: # PCA-based methods
+            if 'weighted' in method:
+                # Normalize logprobs to [0, 2]: Higher prob = higher weight (focus on coherent samples)
+                # For pairs, use difference or average; here, weight by pos logprob (more honest = higher weight) 
+                pair_probs = logprobs.view(-1, 2).mean(1)  # Average logprob per pair [n_pairs]
+                weights = torch.softmax(pair_probs, dim=0) * 2.0  # [0, 2] range
+                weights = torch.clamp(weights, min=0.0)  # Non-negative
+                # Reshape to match train (interleave for pos/neg, but since train is diff, use pair weights)
+                # train will be defined below; just repeat to match pairwise diffs length
+                # weights used with train = h[::2] - h[1::2], so shapes match (n_pairs,)
+            else:
+                weights = None
+            # run PCA on difference vectors between positive and negative examples
+            train = h[::2] - h[1::2]
+            directions[layer] = PCAWeighted(train, weights=weights)
 
-        # make sure the direction has positive personas as +ve (otherwise flip)
-        directions[layer] = choose_sign_from_hiddens(directions[layer], h)
+            # make sure the direction has positive personas as +ve (otherwise flip)
+            directions[layer] = choose_sign_from_hiddens(directions[layer], h)
 
     return directions
 

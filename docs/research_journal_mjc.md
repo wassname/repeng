@@ -309,3 +309,90 @@ Looking at your results:
 - down_proj_fisher_steer_reg2: score 8.54 (residual space)
   
 This suggests steering in the expanded MLP space is more effective than the residual stream, which makes sense because, there are more degrees of freedom to encode nuanced preferences. It might be more linear is it's more sparse, and it's also pre -nonlinearity so less saturated.
+
+# 2025-09-27 19:05:31 trying on more layer groups, and with IEP fisher matrix
+
+hmm for some reason it's got worse
+
+| method                                               |   slope |   r2 |   valid_frac |   p_value |   score |    min |   max |
+|:-----------------------------------------------------|--------:|-----:|-------------:|----------:|--------:|-------:|------:|
+| \d+$_pca_diff_weighted                               |   14.12 | 0.8  |            1 |      0.04 |   11.22 |  -8.5  | 27    |
+| \d+$_svd_steer                                       |   10.76 | 0.9  |            1 |      0.01 |    9.72 |   2.5  | 28.12 |
+| \d+$_pca_diff                                        |    9.22 | 0.95 |            1 |      0    |    8.79 |   5.5  | 26.62 |
+| \.mlp$_pca_diff_weighted                             |    6.02 | 0.85 |            1 |      0.03 |    5.13 |   9.25 | 23.62 |
+| down_proj_pca_diff_weighted                          |    4.85 | 0.95 |            1 |      0    |    4.62 |  12.5  | 22.75 |
+| \.v_proj_pca_diff_weighted                           |    4.71 | 0.93 |            1 |      0.01 |    4.36 |  11.25 | 22.75 |
+| down_proj_fisher_steer_reg2                          |   -4.53 | 0.89 |            1 |      0.02 |    4.03 |  11.5  | 22.75 |
+| \.mlp$_fisher_steer_reg2_emp                         |   -4.57 | 0.83 |            1 |      0.03 |    3.81 |  10.5  | 21.75 |
+| \.v_proj_pca_diff                                    |  -10.65 | 0.35 |            1 |      0.3  |    3.69 | -17    | 20.75 |
+| \.mlp$_fisher_steer_cov_reg1                         |   -3.9  | 0.94 |            1 |      0.01 |    3.68 |  14    | 22.75 |
+| down_proj_fisher_steer_reg3                          |   -2.95 | 0.97 |            1 |      0    |    2.85 |  15.5  | 21.38 |
+| \.v_proj_svd_steer                                   |    2.97 | 0.88 |            1 |      0.02 |    2.61 |  15    | 21.62 |
+| down_proj_fisher_steer_reg2_emp                      |   -2.81 | 0.9  |            1 |      0.01 |    2.51 |  15.25 | 22    |
+| \d+$_fisher_steer_cov_reg1                           |   -2.58 | 0.89 |            1 |      0.02 |    2.28 |  15    | 21.25 |
+| down_proj_fisher_steer_cov_reg1                      |   -2.8  | 0.78 |            1 |      0.05 |    2.19 |  14    | 21.75 |
+| \.o_proj_fisher_steer_reg3                           |   -2.4  | 0.88 |            1 |      0.02 |    2.11 |  14.75 | 20.25 |
+| \d+$_fisher_steer_reg2_emp                           |   -3.52 | 0.59 |            1 |      0.13 |    2.09 |  11.25 | 21.88 |
+| \d+$_fisher_steer_reg2                               |   -2.62 | 0.79 |            1 |      0.04 |    2.08 |  13.5  | 20    |
+| mlp.up_proj_fisher_steer_reg2_emp                    |   -1.95 | 0.95 |            1 |      0    |    1.85 |  15.25 | 19.5  |
+| \d+$_fisher_steer_reg3                               |   -2.04 | 0.87 |            1 |      0.02 |    1.77 |  16.25 | 20.62 |
+| \.mlp$_fisher_steer_reg2                             |   -2.17 | 0.62 |            1 |      0.12 |    1.34 |  13.5  | 19.5  |
+| \.o_proj_fisher_steer_reg2                           |   -1.82 | 0.68 |            1 |      0.08 |    1.25 |  16.25 | 20.75 |
+| \.mlp$_svd_steer                                     |    1.59 | 0.65 |            1 |      0.1  |    1.03 |  15.75 | 19.25 |
+| mlp\.up_proj|self_attn\.q_proj_fisher_steer_reg2_emp |   -1.76 | 0.59 |            1 |      0.13 |    1.03 |  16.75 | 22.12 |
+| down_proj_svd_steer                                  |    1.78 | 0.57 |            1 |      0.14 |    1.02 |  14    | 18.75 |
+| \.o_proj_fisher_steer_dual_neg                       |   -1.36 | 0.69 |            1 |      0.08 |    0.94 |  15.25 | 18.75 |
+| mlp.up_proj_fisher_steer_cov_reg1                    |   -1.31 | 0.68 |            1 |      0.09 |    0.89 |  16.25 | 20    |
+| \.q_proj_fisher_steer_reg2_emp                       |   -1.31 | 0.66 |            1 |      0.09 |    0.87 |  16.75 | 20.12 |
+| \.o_proj_pca_diff_weighted                           |   -2.2  | 0.37 |            1 |      0.28 |    0.81 |  11.75 | 19.5  |
+| \.o_proj_fisher_steer_reg2_emp                       |   -1.22 | 0.64 |            1 |      0.1  |    0.78 |  16.25 | 19.75 |
+| mlp\.up_proj|self_attn\.q_proj_pca_diff              |   -1.23 | 0.59 |            1 |      0.13 |    0.73 |  17.5  | 20.5  |
+| \.o_proj_fisher_steer_cov_reg1                       |   -1.04 | 0.56 |            1 |      0.15 |    0.58 |  17.25 | 20.5  |
+| down_proj_fisher_steer_dual_neg                      |    1.53 | 0.35 |            1 |      0.29 |    0.54 |  14.5  | 19.5  |
+| \.q_proj_fisher_steer_reg3                           |    0.68 | 0.77 |            1 |      0.05 |    0.53 |  18.25 | 19.75 |
+| \.mlp$_fisher_steer_reg3                             |   -1.4  | 0.37 |            1 |      0.27 |    0.52 |  15.25 | 20.25 |
+| \.k_proj_fisher_steer_cov_reg1                       |   -1.08 | 0.42 |            1 |      0.23 |    0.46 |  15    | 18.5  |
+| \.k_proj_pca_diff_weighted                           |    1.33 | 0.34 |            1 |      0.3  |    0.45 |  15.75 | 20.88 |
+| \.mlp$_pca_diff                                      |    1.26 | 0.3  |            1 |      0.34 |    0.38 |  16    | 21.12 |
+| \.v_proj_fisher_steer_reg2                           |    1.32 | 0.28 |            1 |      0.36 |    0.37 |  15    | 20.62 |
+| mlp.gate_proj_pca_diff                               |    0.72 | 0.5  |            1 |      0.18 |    0.36 |  17.25 | 19.25 |
+| \.v_proj_fisher_steer_cov_reg1                       |   -1.04 | 0.34 |            1 |      0.3  |    0.36 |  17    | 21.12 |
+| mlp\.up_proj|self_attn\.q_proj_fisher_steer_reg3     |   -1.04 | 0.34 |            1 |      0.3  |    0.36 |  16.25 | 20.5  |
+| \.q_proj_fisher_steer_dual_neg                       |   -0.96 | 0.34 |            1 |      0.3  |    0.32 |  16.25 | 20.25 |
+| mlp.gate_proj_fisher_steer_dual_neg                  |   -1.22 | 0.26 |            1 |      0.38 |    0.32 |  14.5  | 20.12 |
+| \.q_proj_svd_steer                                   |    0.77 | 0.4  |            1 |      0.26 |    0.31 |  17.25 | 20    |
+| \d+$_fisher_steer_dual_neg                           |   -1.48 | 0.2  |            1 |      0.45 |    0.29 |  13    | 20.88 |
+| mlp.up_proj_pca_diff                                 |   -0.82 | 0.35 |            1 |      0.29 |    0.29 |  15.5  | 18.75 |
+| \.q_proj_pca_diff                                    |   -0.82 | 0.34 |            1 |      0.3  |    0.28 |  17.25 | 20.25 |
+| mlp.up_proj_fisher_steer_reg3                        |   -0.87 | 0.32 |            1 |      0.32 |    0.28 |  15.75 | 19.5  |
+| \.v_proj_fisher_steer_dual_neg                       |   -0.78 | 0.34 |            1 |      0.3  |    0.27 |  17.5  | 20.5  |
+| \.k_proj_fisher_steer_dual_neg                       |   -0.27 | 0.74 |            1 |      0.06 |    0.2  |  17.25 | 18    |
+| mlp\.up_proj|self_attn\.q_proj_pca_diff_weighted     |   -0.62 | 0.25 |            1 |      0.39 |    0.16 |  17.5  | 20.38 |
+| \.v_proj_fisher_steer_reg3                           |    0.63 | 0.23 |            1 |      0.41 |    0.15 |  17.75 | 20.5  |
+| \.k_proj_pca_diff                                    |    0.63 | 0.23 |            1 |      0.41 |    0.15 |  17.25 | 20    |
+| \.o_proj_svd_steer                                   |   -1    | 0.13 |            1 |      0.55 |    0.13 |  15.5  | 21.12 |
+| mlp.gate_proj_fisher_steer_reg2_emp                  |    0.81 | 0.12 |            1 |      0.56 |    0.1  |  16.75 | 21.5  |
+| \.mlp$_fisher_steer_dual_neg                         |   -0.5  | 0.15 |            1 |      0.52 |    0.08 |  16.62 | 19.25 |
+| \.k_proj_fisher_steer_reg2_emp                       |    0.54 | 0.14 |            1 |      0.54 |    0.07 |  17    | 19.75 |
+| mlp.gate_proj_fisher_steer_cov_reg1                  |   -0.41 | 0.16 |            1 |      0.51 |    0.07 |  17.25 | 19.5  |
+| \.k_proj_fisher_steer_reg2                           |    0.46 | 0.14 |            1 |      0.54 |    0.06 |  17.75 | 20.25 |
+| mlp.gate_proj_fisher_steer_reg2                      |   -0.27 | 0.15 |            1 |      0.53 |    0.04 |  17.5  | 19.25 |
+| mlp.up_proj_fisher_steer_dual_neg                    |    0.4  | 0.08 |            1 |      0.65 |    0.03 |  18    | 20.88 |
+| mlp\.up_proj|self_attn\.q_proj_fisher_steer_reg2     |    0.45 | 0.06 |            1 |      0.7  |    0.03 |  16.25 | 20.25 |
+| \.q_proj_pca_diff_weighted                           |    0.32 | 0.08 |            1 |      0.64 |    0.03 |  18    | 20.25 |
+| mlp.gate_proj_pca_diff_weighted                      |    0.33 | 0.08 |            1 |      0.65 |    0.03 |  18.25 | 20.5  |
+| mlp.up_proj_svd_steer                                |   -0.31 | 0.08 |            1 |      0.64 |    0.03 |  17.75 | 20    |
+| \.v_proj_fisher_steer_reg2_emp                       |    0.26 | 0.05 |            1 |      0.71 |    0.01 |  17    | 19.5  |
+| mlp\.up_proj|self_attn\.q_proj_svd_steer             |   -0.18 | 0.08 |            1 |      0.65 |    0.01 |  17.75 | 19.25 |
+| mlp\.up_proj|self_attn\.q_proj_fisher_steer_cov_reg1 |   -0.37 | 0.03 |            1 |      0.76 |    0.01 |  17.25 | 21    |
+| mlp.gate_proj_fisher_steer_reg3                      |    0.13 | 0.06 |            1 |      0.69 |    0.01 |  18.5  | 19.75 |
+| \.q_proj_fisher_steer_reg2                           |    0.24 | 0.02 |            1 |      0.81 |    0.01 |  16.75 | 19.5  |
+| \.q_proj_fisher_steer_cov_reg1                       |   -0.27 | 0.02 |            1 |      0.84 |    0    |  15.5  | 20    |
+| mlp\.up_proj|self_attn\.q_proj_fisher_steer_dual_neg |    0.14 | 0.02 |            1 |      0.83 |    0    |  18    | 20    |
+| \.o_proj_pca_diff                                    |    0.14 | 0.01 |            1 |      0.88 |    0    |  16.25 | 19.5  |
+| \.k_proj_fisher_steer_reg3                           |   -0.09 | 0.01 |            1 |      0.89 |    0    |  17.75 | 20    |
+| \.k_proj_svd_steer                                   |    0.08 | 0    |            1 |      0.92 |    0    |  15.75 | 18.75 |
+| mlp.up_proj_fisher_steer_reg2                        |   -0.04 | 0    |            1 |      0.92 |    0    |  18    | 19.5  |
+| mlp.gate_proj_svd_steer                              |    0.07 | 0    |            1 |      0.94 |    0    |  17.25 | 20.88 |
+| down_proj_pca_diff                                   |    0.04 | 0    |            1 |      0.97 |    0    |  16.75 | 20.75 |
+| mlp.up_proj_pca_diff_weighted                        |   -0    | 0    |            1 |      0.99 |    0    |  17.75 | 18.75 |
