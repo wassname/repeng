@@ -84,9 +84,9 @@ def natural_gradient_steering(
             F_matrix = torch.einsum("bi,bj->ij", centered_grads, centered_grads) / denom
 
     # Adaptive regularization (your commented version, now default if lambda_reg is None)
+    trace_F = torch.trace(F_matrix)
+    avg_eig = trace_F / dim
     if lambda_reg is None:
-        trace_F = torch.trace(F_matrix)
-        avg_eig = trace_F / dim
         lambda_reg = max(1e-6, 0.01 * avg_eig)
 
     # New: Min eigenvalue clamping for stability (if batch_size << dim, per Wu et al. App. H)

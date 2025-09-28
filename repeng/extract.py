@@ -547,7 +547,7 @@ def _collect_activations_grads(
                 hs_last.retain_grad()  # IMPORTANT: Need gradients w.r.t. loss inputs
                 hs_neg = hs_last[1::2]
                 hs_pos = hs_last[::2]
-                loss = compute_reprpo_nll_margin_loss(hs_pos=hs_pos, hs_neg=hs_neg, logp_pos=logp_pos, logp_neg=logp_neg)
+                loss = compute_reprpo_nll_margin_loss(hs_pos=hs_pos, hs_neg=hs_neg, logp_pos=logp_pos, logp_avg_pos_label=logp_neg, )
                 loss.backward()
 
 
