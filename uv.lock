@@ -1888,8 +1888,8 @@ wheels = [
 
 [[package]]
 name = "peft"
-version = "0.17.1"
-source = { registry = "https://pypi.org/simple" }
+version = "0.17.2.dev0"
+source = { git = "https://github.com/huggingface/peft.git#6030f9160ed2fc17220f6f41382a66f1257b6a93" }
 dependencies = [
     { name = "accelerate" },
     { name = "huggingface-hub" },
@@ -1902,10 +1902,6 @@ dependencies = [
     { name = "torch" },
     { name = "tqdm" },
     { name = "transformers" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/70/b8/2e79377efaa1e5f0d70a497db7914ffd355846e760ffa2f7883ab0f600fb/peft-0.17.1.tar.gz", hash = "sha256:e6002b42517976c290b3b8bbb9829a33dd5d470676b2dec7cb4df8501b77eb9f", size = 568192, upload-time = "2025-08-21T09:25:22.703Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/49/fe/a2da1627aa9cb6310b6034598363bd26ac301c4a99d21f415b1b2855891e/peft-0.17.1-py3-none-any.whl", hash = "sha256:3d129d64def3d74779c32a080d2567e5f7b674e77d546e3585138216d903f99e", size = 504896, upload-time = "2025-08-21T09:25:18.974Z" },
 ]
 
 [[package]]
@@ -2557,6 +2553,7 @@ dependencies = [
     { name = "jaxtyping" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "peft" },
     { name = "scikit-learn" },
     { name = "torch" },
     { name = "tqdm" },
@@ -2588,6 +2585,7 @@ requires-dist = [
     { name = "gguf", specifier = ">=0.13.0" },
     { name = "jaxtyping", specifier = ">=0.3.2" },
     { name = "numpy", specifier = ">=1.26.4" },
+    { name = "peft", git = "https://github.com/huggingface/peft.git" },
     { name = "scikit-learn", specifier = ">=1.4.0" },
     { name = "torch", specifier = ">=2.1.2" },
     { name = "tqdm", specifier = ">=4.66.1" },
@@ -2608,7 +2606,7 @@ nbs = [
     { name = "jaxtyping", specifier = ">=0.3.2" },
     { name = "matplotlib", specifier = ">=3.10.6" },
     { name = "pandas", specifier = ">=2.3.2" },
-    { name = "peft", specifier = ">=0.17.1" },
+    { name = "peft", git = "https://github.com/huggingface/peft.git" },
     { name = "tabulate", specifier = ">=0.9.0" },
     { name = "umap-learn", specifier = ">=0.5.9.post2" },
 ]
