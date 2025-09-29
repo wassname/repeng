@@ -7,6 +7,7 @@ from functools import partial
 from peft.tuners.tuners_utils import BaseTunerLayer
 from peft.tuners.road.layer import RoadLayer
 from peft.tuners.ia3.layer import IA3Layer
+from peft.tuners.lora.layer import LoraLayer
 
 
 class AdapterScaler:
@@ -47,8 +48,33 @@ class AdapterScaler:
         
         if adapter_name in param_dict:
             original = param_dict[adapter_name]
-            param_dict[adapter_name] = original * coeff
+            # Symmetric flip around 1.0: (original - 1) * coeff + 1
+            scaled = (original - 1.0) * coeff + 1.0
+            param_dict[adapter_name] = scaled
             originals.append((param_dict, adapter_name, original))
+        
+        return (args, kwargs)
+    
+    @staticmethod
+    def scale_lora_params(
+        module: LoraLayer,
+        args: Tuple,
+        kwargs: Dict[str, Any],
+        adapter_name: str,
+        coeff: float,
+        originals: List[Tuple]
+    ) -> Tuple:
+        """Scale LoRA adapter parameters (both A and B) for reversible steering."""
+        # LoRA has lora_A and lora_B per adapter
+        if hasattr(module, 'lora_A') and adapter_name in module.lora_A:
+            original_A = module.lora_A[adapter_name]
+            module.lora_A[adapter_name] = original_A * coeff
+            originals.append((module.lora_A, adapter_name, original_A))
+        
+        if hasattr(module, 'lora_B') and adapter_name in module.lora_B:
+            original_B = module.lora_B[adapter_name]
+            module.lora_B[adapter_name] = original_B * coeff
+            originals.append((module.lora_B, adapter_name, original_B))
         
         return (args, kwargs)
 
@@ -95,7 +121,7 @@ def AdapterSteer(
     if scale_param not in ['theta', 'alpha']:
         raise ValueError("scale_param must be 'theta' or 'alpha'.")
     
-    if coeff == 0:
+    if coeff is None:
         with model.disable_adapter(adapter_name):
             yield
         return
@@ -118,6 +144,13 @@ def AdapterSteer(
             elif isinstance(module, IA3Layer) and adapter_name in module.active_adapters:
                 hook_fn = partial(
                     AdapterScaler.scale_ia3_params,
+                    adapter_name=adapter_name,
+                    coeff=coeff,
+                    originals=originals
+                )
+            elif isinstance(module, LoraLayer) and adapter_name in module.lora_A:  # Check lora_A as proxy
+                hook_fn = partial(
+                    AdapterScaler.scale_lora_params,
                     adapter_name=adapter_name,
                     coeff=coeff,
                     originals=originals
