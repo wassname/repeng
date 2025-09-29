@@ -108,7 +108,7 @@ class ControlModel(torch.nn.Module):
             self.model, 
             layers=list(self.directions.keys()),
             retain_output=False,
-            detach=True,
+            # detach=True,
             edit_output=self.edit_fn,
         ) as td:
             return fn(*args, **kwargs)
@@ -205,7 +205,7 @@ def get_available_layers(model, regex_filter: Optional[str] = None, layer_range:
     return short_available_layers, available_layers
 
 
-@torch.no_grad()
+# @torch.no_grad()
 def baukit_dir_add_hook(
     output: Float[Tensor, "... d_act"],
     layer: str,
@@ -220,7 +220,7 @@ def baukit_dir_add_hook(
         modified = output[0]
     else:
         modified = output
-    direction = directions[layer].to(device=output.device, dtype=output.dtype) * coeff
+    direction = directions[layer] * coeff#.to(device=output.device, dtype=output.dtype) * coeff
     modified = modified + direction
     if isinstance(output, tuple):
         output = (modified,) + output[1:]
@@ -250,6 +250,7 @@ def steer(model: 'PreTrainedModel', vector: "ControlVector", coeff: float):
         model, 
         layers=layers,
         retain_output=False,
+        retain_grad=True,
         detach=True,
         edit_output=edit_fn,
     ) as td:
