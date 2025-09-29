@@ -25,7 +25,7 @@ from .losses import compute_reprpo_nll_margin_loss
 @dataclasses.dataclass
 class ControlVector:
     model_type: str
-    directions: dict[str, np.ndarray]
+    directions: dict[str, torch.Tensor]
 
     @classmethod
     def train(
