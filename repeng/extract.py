@@ -16,9 +16,9 @@ from baukit import TraceDict
 
 from .control import ControlModel, model_layer_list
 from .dataset import DatasetEntry
-from .svd_steering import svd_steering
-from .fisher_steering import natural_gradient_steering
-from .losses import compute_reprpo_nll_margin_loss
+from .analyze_vectors.svd_steering import svd_steering
+from .analyze_vectors.fisher_steering import natural_gradient_steering
+from .train.inner_contrastive_loss import contrastive_steering_loss_noref
 
 
 
@@ -547,7 +547,7 @@ def _collect_activations_grads(
                 hs_last.retain_grad()  # IMPORTANT: Need gradients w.r.t. loss inputs
                 hs_neg = hs_last[1::2]
                 hs_pos = hs_last[::2]
-                loss = compute_reprpo_nll_margin_loss(hs_pos=hs_pos, hs_neg=hs_neg, logp_pos=logp_pos, logp_avg_pos_label=logp_neg, )
+                loss = contrastive_steering_loss_noref(hs_pos=hs_pos, hs_neg=hs_neg, logp_pos=logp_pos, logp_avg_pos_label=logp_neg, )
                 loss.backward()
 
 

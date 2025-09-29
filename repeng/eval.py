@@ -23,7 +23,6 @@ def binary_log_cls(logits, choice_ids):
     return log_ratio, log_choices
 
 
-
 import re
 import torch
 from typing import List, Tuple, Optional
@@ -76,7 +75,7 @@ def find_token_positions_for_regex(
     
     return results
 
-def extr_logratios(out, input_ids, tokenizer, choice_ids, regex_pattern: str):
+def extract_log_ratios(out: 'ModelOutput', input_ids, tokenizer, choice_ids, regex_pattern: str):
     """Get [sequences x answers] log ratios for each of len(sequences) X regexp matches."""
     N = input_ids.shape[1]
     repeats = out.sequences.shape[0]

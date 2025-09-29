@@ -7,7 +7,7 @@ from typing import List, Dict, Optional, Literal
 import tqdm
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
-from .control import ControlModel
+from ..control import ControlModel
 
 
 def natural_gradient_steering(

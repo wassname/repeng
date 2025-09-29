@@ -240,7 +240,7 @@ def steer(model: 'PreTrainedModel', vector: "ControlVector", coeff: float):
     if isinstance(model, ControlModel):
         model = model.model
     layers=list(vector.directions.keys())
-    if coeff==0:
+    if coeff is None:
         edit_fn = noop_edit
     else:
         edit_fn = functools.partial(
@@ -251,7 +251,7 @@ def steer(model: 'PreTrainedModel', vector: "ControlVector", coeff: float):
         layers=layers,
         retain_output=False,
         retain_grad=True,
-        detach=True,
+        detach=False,
         edit_output=edit_fn,
     ) as td:
         yield model
