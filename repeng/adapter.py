@@ -64,17 +64,21 @@ class AdapterScaler:
         coeff: float,
         originals: List[Tuple]
     ) -> Tuple:
-        """Scale LoRA adapter parameters (both A and B) for reversible steering."""
-        # LoRA has lora_A and lora_B per adapter
+        """Scale LoRA adapter parameters (A.weight and B.weight) for reversible steering."""
+        # LoRA has lora_A and lora_B as ParameterDicts of nn.Linear modules
         if hasattr(module, 'lora_A') and adapter_name in module.lora_A:
-            original_A = module.lora_A[adapter_name]
-            module.lora_A[adapter_name] = original_A * coeff
-            originals.append((module.lora_A, adapter_name, original_A))
+            lora_A_linear = module.lora_A[adapter_name]
+            original_weight_A = lora_A_linear.weight.data
+            # Non-in-place: create new tensor
+            lora_A_linear.weight.data = original_weight_A * coeff
+            originals.append((lora_A_linear.weight, None, original_weight_A))
         
         if hasattr(module, 'lora_B') and adapter_name in module.lora_B:
-            original_B = module.lora_B[adapter_name]
-            module.lora_B[adapter_name] = original_B * coeff
-            originals.append((module.lora_B, adapter_name, original_B))
+            lora_B_linear = module.lora_B[adapter_name]
+            original_weight_B = lora_B_linear.weight.data
+            # Non-in-place: create new tensor
+            lora_B_linear.weight.data = original_weight_B * coeff
+            originals.append((lora_B_linear.weight, None, original_weight_B))
         
         return (args, kwargs)
 
@@ -166,8 +170,19 @@ def AdapterSteer(
         yield
         
     finally:
-        for param_dict, key, original in originals:
-            param_dict[key] = original
+        # General restoration: (target_param, attr, original_value)
+        # For dicts (IA3/ROAD): target is dict, attr is adapter_name str, original is tensor
+        # For LoRA: target is Linear.weight tensor, attr is None, original is tensor
+        for target, attr, original in originals:
+            if attr is None:
+                # Direct tensor restoration (LoRA weights)
+                target.data = original
+            else:
+                # Dict restoration (IA3/ROAD)
+                target[attr] = original
         
         for handle in hooks:
             handle.remove()
+
+
+# ... rest of file unchanged
