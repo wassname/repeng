@@ -47,6 +47,8 @@ def contrastive_steering_loss_with_ref(
     p=2,
     eps=1e-6,
     coef=1.0,
+    margin=3,
+    boundary_order=4,
 ):
     """
     Contrastive loss for training reversible steering adapters.
@@ -72,6 +74,7 @@ def contrastive_steering_loss_with_ref(
         eps: Small epsilon for numerical stability
         coef: Coefficient indicating adapter direction (1.0 or -1.0)
               When training with AdapterSteer(model, coeff=coef), this should match
+        margin: Margin for coherence constraint (default: 1.2)
     
     Returns:
         loss: Combined loss (directional + coherence)
@@ -113,15 +116,15 @@ def contrastive_steering_loss_with_ref(
     assert suffix_mask[:, -1].sum() > 0, "suffix_mask is all zero!"
 
     # Margin loss: allow up to 20% degradation in log probability, DPO often has similar nll degradation
-    margin = 1.2
+    
     coherence_gap = (baseline_logp * margin - logp_pos)  # sequence-level constraint
     # coherence_gap = 
     
-    # Soft clamp to prevent extreme values
+    # Soft clamp to prevent extreme values on one particular token, which is one way to game the loss
     coherence_gap = soft_clamp(coherence_gap, -5.0, 5.0, sharpness=1.0)
     
     # Quartic penalty for sharp boundary (consider reducing to quadratic for stability)
-    loss_coherence_bounds = F.relu(coherence_gap)**2
+    loss_coherence_bounds = F.relu(coherence_gap)**boundary_order
 
     # Aggregate over tokens with attention weighting
     loss_coherence_bounds = reduce_tokens_w_attention(loss_coherence_bounds, suffix_mask[:, :-1])

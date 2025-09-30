@@ -1,3 +1,14 @@
+"""
+Adapter steering for contrastive training with proper gradient flow.
+
+Why temporarily replace ParameterDict with dict of scaled tensors?
+
+We need to satisfy 3 competing requirements:
+1. Optimizer tracks original Parameter objects - can't replace them
+2. Gradients flow through differentiable operations - need param * coeff in graph  
+3. Forward pass uses scaled values - module.vera_lambda_b[adapter_name] must return scaled tensor
+
+"""
 import torch
 import torch.nn as nn
 from contextlib import contextmanager
@@ -20,16 +31,16 @@ class AdapterScaler:
         originals: List[Tuple]
     ) -> Tuple:
         """Scale IA3 adapter parameters."""
-        param_dict = module.ia3_l
+        # Store original ParameterDict
+        originals.append((module, 'ia3_l', module.ia3_l))
         
-        if adapter_name in param_dict:
-            original = param_dict[adapter_name]
-            # Symmetric flip around 1.0: (original - 1) * coeff + 1
-            scaled = (original - 1.0) * coeff + 1.0
-            # scaled = original * coeff  # Direct mul: inverts for -1, amplifies for +1
-            param_dict[adapter_name] = scaled
-            originals.append((param_dict, adapter_name, original))
-        
+        # Replace with new dict containing scaled tensors
+        # Use object.__setattr__ to bypass nn.Module's type checking
+        # Gradients flow through multiplication to original parameters
+        object.__setattr__(module, 'ia3_l', {
+            k: ((v - 1.0) * coeff + 1.0) if k == adapter_name else v
+            for k, v in module.ia3_l.items()
+        })
     
     @staticmethod
     def scale_vera_params(
@@ -38,18 +49,35 @@ class AdapterScaler:
         coeff: float,
         originals: List[Tuple]
     ) -> Tuple:
-        """Scale VeRA adapter parameters (lambda_d and lambda_b) for reversible steering."""
-        if hasattr(module, 'vera_lambda_d') and adapter_name in module.vera_lambda_d:
-            lambda_d = module.vera_lambda_d[adapter_name]
-            original_d = lambda_d
-            module.vera_lambda_d[adapter_name] = lambda_d * coeff
-            originals.append((module.vera_lambda_d, adapter_name, original_d))
+        """Scale VeRA adapter parameters (lambda_d and lambda_b) for reversible steering.
+        
+        Scales both lambda_d and lambda_b by coeff. Since they multiply together in the
+        forward pass, this gives an overall scaling of coeff^2, but allows both parameters
+        to learn the steering direction. Gradients flow back through the multiplication
+        to the original Parameter objects tracked by the optimizer.
+        """
+        # if hasattr(module, 'vera_lambda_d') and adapter_name in module.vera_lambda_d:
+        #     # Store original ParameterDict
+        #     originals.append((module, 'vera_lambda_d', module.vera_lambda_d))
+            
+        #     # Replace with new dict containing scaled tensors
+        #     # Use object.__setattr__ to bypass nn.Module's type checking
+        #     object.__setattr__(module, 'vera_lambda_d', {
+        #         k: v * coeff if k == adapter_name else v
+        #         for k, v in module.vera_lambda_d.items()
+        #     })
         
         if hasattr(module, 'vera_lambda_b') and adapter_name in module.vera_lambda_b:
-            lambda_b = module.vera_lambda_b[adapter_name]
-            original_b = lambda_b
-            module.vera_lambda_b[adapter_name] = lambda_b * coeff
-            originals.append((module.vera_lambda_b, adapter_name, original_b))
+            # Store original ParameterDict
+            originals.append((module, 'vera_lambda_b', module.vera_lambda_b))
+            
+            # Replace with new dict containing scaled tensors
+            # Computation graph: scaled_tensor = original_param * coeff
+            # Gradients will flow back through multiplication to original_param
+            object.__setattr__(module, 'vera_lambda_b', {
+                k: v * coeff if k == adapter_name else v
+                for k, v in module.vera_lambda_b.items()
+            })
         
 
 
@@ -99,17 +127,16 @@ def AdapterSteer(
     try:
         for name, module in model.named_modules():
             if isinstance(module, IA3Layer) and adapter_name in module.active_adapters:
-                AdapterScaler(scale_ia3_params=module, adapter_name=adapter_name, coeff=coeff, originals=originals)
-            elif isinstance(module, VeraLayer) and adapter_name in module.vera_lambda_d:
+                AdapterScaler.scale_ia3_params(module=module, adapter_name=adapter_name, coeff=coeff, originals=originals)
+            elif isinstance(module, VeraLayer) and adapter_name in module.vera_lambda_b:
                 AdapterScaler.scale_vera_params(module=module, adapter_name=adapter_name, coeff=coeff, originals=originals)
         
         yield
         
     finally:
-        # General restoration: (target_param, attr, original_value)
-        # For dicts (IA3/VeRA): target is dict, attr is adapter_name str, original is tensor
-        for target, attr, original in originals:
-            # Dict restoration (IA3/VeRA)
-            target[attr] = original
-        
+        # Restore original ParameterDicts before backward pass
+        # Format: (module, attr_name, original_param_dict)
+        for module, attr_name, original_param_dict in originals:
+            setattr(module, attr_name, original_param_dict)
+
 

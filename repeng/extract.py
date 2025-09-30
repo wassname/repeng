@@ -596,25 +596,20 @@ def _collect_activations_grads(
     hidden_states = {k: torch.vstack(v) for k, v in hidden_states.items()}
     completion_lprob = torch.tensor(completion_lprob)
     
-    # Stack loss-input gradient norms (for proper iEF weighting)
-    loss_input_grad_norms = torch.vstack(loss_input_grad_norms_list) if loss_input_grad_norms_list else torch.zeros(len(completion_lprob), dtype=torch.float32)
-    
+
     # For iEF weighting: use the loss-input gradient norms for all layers
     # These are ||∇_{hs_last} loss||² - the activations that directly feed into ReprPO loss
     # Equivalent to Wu et al.'s ||∇_z l_n||² (gradients w.r.t. logits in their setup)
-    feat_grad_norms = {}
-    for layer in final_grads.keys():
-        feat_grad_norms[layer] = loss_input_grad_norms.flatten() if final_grads[layer] is not None else None
-    
-    # Stack per-batch logits norms (kept for compatibility/debugging)
-    logits_grad_norms = torch.vstack(logits_grad_norms_list) if logits_grad_norms_list else torch.zeros(len(completion_lprob), dtype=torch.float32)
+    # Stack loss-input gradient norms (for proper iEF weighting)
+    loss_input_grad_norms = torch.concat(loss_input_grad_norms_list)  # [total_batch]
+
     
     # print(next(iter(hidden_states.values())).shape, next(iter(final_grads.values())).shape, completion_lprob.shape, next(iter(feat_grad_norms.values())).shape)
     return (
         hidden_states, # {layer: [batch, hidden_dim]}
         completion_lprob, # [batch]
         final_grads, # {layer: [batch, hidden_dim]} - gradients w.r.t. intermediate layers
-        feat_grad_norms, # {layer: [batch]} - ||∇_{loss_input} loss||² for iEF weighting
+        loss_input_grad_norms, # {layer: [batch]} - ||∇_{loss_input} loss||² for iEF weighting
     )
 
 
