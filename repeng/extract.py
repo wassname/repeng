@@ -260,7 +260,7 @@ def PCAWeighted(train, weights=None):
         # Normalize weights to sum to 1
         weights_norm = weights_flat / weights_flat.sum()
     else:
-        weights_norm = torch.ones(train.shape[0])
+        weights_norm = torch.ones_like(train)[:, 0]
     
     # Weighted mean and centering
     weighted_mean = torch.sum(train * weights_norm.unsqueeze(-1), dim=0) / weights_norm.sum()
@@ -273,7 +273,7 @@ def PCAWeighted(train, weights=None):
     U, S, Vt = torch.linalg.svd(train_weighted_torch, full_matrices=False)
     
     # First PC direction
-    direction = Vt[0].cpu()
+    direction = Vt[0]#.cpu()
     return direction
 
 

@@ -433,6 +433,19 @@ hmm for some reason it's got worse
 - For `coef=1`: high loss (needs to learn alignment)
 - For `coef=-1`: negative loss (partial anti-alignment)
 
+**Empirical confirmation** (cosine similarity between PCA and batch reference):
+```
+gate_proj (dim=9728): angles ≈ ±0.01 to ±0.30 (nearly orthogonal)
+up_proj   (dim=9728): angles ≈ ±0.02 (nearly orthogonal)  
+down_proj (dim=2560): angles ≈ ±0.05 (slightly higher, still mostly orthogonal)
+```
+
+**Dimensionality effect**: 
+- Higher alignment in lower-dim space (down_proj: 2560 vs gate/up: 9728)
+- Two possible explanations:
+  1. **Fewer degrees of freedom**: In 2560-dim, random vectors have higher expected cosine similarity than in 9728-dim (curse of dimensionality in reverse). Less room for orthogonal subspaces.
+  2. **Residual stream structure**: down_proj writes to residual stream (2560-dim), which carries all information forward. This bottleneck might force PCA and reference to share more structure - both must compress through same low-dim channel. gate/up_proj operate in expanded MLP space (9728-dim) with more room for independent subspaces.
+
 **Why the mismatch?**
 1. **Different subspaces**: PCA finds global max-variance direction across full dataset; reference is per-batch instantaneous direction. These can be in different subspaces of the high-dim hidden space.
 2. **Batch composition**: Reference direction depends on which pos/neg pairs are in current batch. PCA averages over all pairs → different orientation.
@@ -440,15 +453,87 @@ hmm for some reason it's got worse
 
 **Key insight**: 
 - If PCA were just sign-flipped, you'd see strong reverse steering (large negative logratio). 
-- Instead, weak effect suggests PCA direction is **partially orthogonal** to reference - captures *some* honest/dishonest variance but not the same axis the loss wants.
-- The 0.758 projection means ~38% overlap - PCA found a related but distinct separation direction.
+- Instead, weak effect suggests PCA direction is **nearly orthogonal** to reference - captures *some* honest/dishonest variance but in a different subspace.
+- The near-zero angles confirm: PCA found a valid separation axis, but not the one the loss targets.
 
 **Speculation**: 
 - PCA (unsupervised, global) finds "average honest direction" across dataset
 - Loss (supervised, local) wants "batch-specific honest direction aligned to reference"
 - These differ because: (a) batch variance, (b) PCA ignores coherence (just maximizes separation), (c) high-dim space has many valid separation axes
+- Lower-dim spaces (residual stream) force more alignment due to information bottleneck
 
 **Next steps**: 
-- Try PCA on MLP up_proj (more linear, less entangled) 
+- Try PCA on MLP up_proj (more linear, less entangled) - but expect similar orthogonality
 - Use gradient-based init (`svd_gradient`) - directly optimizes toward loss landscape
+- Consider: maybe PCA init isn't the problem - the loss itself might need to be more flexible about which separation axis to use
 - Add PCA sign/alignment correction: project onto reference, rescale to maximize `|pca_dir @ ref_dir|`
+
+Cosine between pref_dir on activations, and PCA direction on same activations:
+
+not it's highest in the smaller dm
+angle=-0.003, layer=model.layers.10.mlp.gate_proj, dim=torch.Size([9728])
+angle=-0.028, layer=model.layers.10.mlp.up_proj, dim=torch.Size([9728])
+angle=0.009, layer=model.layers.10.mlp.down_proj, dim=torch.Size([2560])
+angle=-0.144, layer=model.layers.11.mlp.gate_proj, dim=torch.Size([9728])
+angle=-0.006, layer=model.layers.11.mlp.up_proj, dim=torch.Size([9728])
+angle=-0.003, layer=model.layers.11.mlp.down_proj, dim=torch.Size([2560])
+angle=-0.145, layer=model.layers.12.mlp.gate_proj, dim=torch.Size([9728])
+angle=0.008, layer=model.layers.12.mlp.up_proj, dim=torch.Size([9728])
+angle=-0.011, layer=model.layers.12.mlp.down_proj, dim=torch.Size([2560])
+angle=-0.012, layer=model.layers.13.mlp.gate_proj, dim=torch.Size([9728])
+angle=-0.009, layer=model.layers.13.mlp.up_proj, dim=torch.Size([9728])
+angle=0.010, layer=model.layers.13.mlp.down_proj, dim=torch.Size([2560])
+angle=0.124, layer=model.layers.14.mlp.gate_proj, dim=torch.Size([9728])
+angle=0.010, layer=model.layers.14.mlp.up_proj, dim=torch.Size([9728])
+angle=0.054, layer=model.layers.14.mlp.down_proj, dim=torch.Size([2560])
+angle=0.076, layer=model.layers.15.mlp.gate_proj, dim=torch.Size([9728])
+angle=0.021, layer=model.layers.15.mlp.up_proj, dim=torch.Size([9728])
+angle=0.010, layer=model.layers.15.mlp.down_proj, dim=torch.Size([2560])
+angle=0.049, layer=model.layers.16.mlp.gate_proj, dim=torch.Size([9728])
+angle=0.011, layer=model.layers.16.mlp.up_proj, dim=torch.Size([9728])
+angle=0.011, layer=model.layers.16.mlp.down_proj, dim=torch.Size([2560])
+angle=0.018, layer=model.layers.17.mlp.gate_proj, dim=torch.Size([9728])
+angle=-0.001, layer=model.layers.17.mlp.up_proj, dim=torch.Size([9728])
+angle=0.019, layer=model.layers.17.mlp.down_proj, dim=torch.Size([2560])
+angle=0.011, layer=model.layers.18.mlp.gate_proj, dim=torch.Size([9728])
+angle=0.004, layer=model.layers.18.mlp.up_proj, dim=torch.Size([9728])
+angle=0.024, layer=model.layers.18.mlp.down_proj, dim=torch.Size([2560])
+angle=-0.076, layer=model.layers.19.mlp.gate_proj, dim=torch.Size([9728])
+angle=0.010, layer=model.layers.19.mlp.up_proj, dim=torch.Size([9728])
+angle=-0.003, layer=model.layers.19.mlp.down_proj, dim=torch.Size([2560])
+angle=0.028, layer=model.layers.20.mlp.gate_proj, dim=torch.Size([9728])
+angle=-0.003, layer=model.layers.20.mlp.up_proj, dim=torch.Size([9728])
+angle=0.013, layer=model.layers.20.mlp.down_proj, dim=torch.Size([2560])
+angle=0.075, layer=model.layers.21.mlp.gate_proj, dim=torch.Size([9728])
+angle=0.005, layer=model.layers.21.mlp.up_proj, dim=torch.Size([9728])
+angle=0.001, layer=model.layers.21.mlp.down_proj, dim=torch.Size([2560])
+angle=0.032, layer=model.layers.22.mlp.gate_proj, dim=torch.Size([9728])
+angle=-0.020, layer=model.layers.22.mlp.up_proj, dim=torch.Size([9728])
+angle=0.024, layer=model.layers.22.mlp.down_proj, dim=torch.Size([2560])
+angle=0.077, layer=model.layers.23.mlp.gate_proj, dim=torch.Size([9728])
+angle=-0.016, layer=model.layers.23.mlp.up_proj, dim=torch.Size([9728])
+angle=-0.000, layer=model.layers.23.mlp.down_proj, dim=torch.Size([2560])
+angle=-0.050, layer=model.layers.24.mlp.gate_proj, dim=torch.Size([9728])
+angle=-0.003, layer=model.layers.24.mlp.up_proj, dim=torch.Size([9728])
+angle=0.031, layer=model.layers.24.mlp.down_proj, dim=torch.Size([2560])
+angle=-0.166, layer=model.layers.25.mlp.gate_proj, dim=torch.Size([9728])
+angle=0.012, layer=model.layers.25.mlp.up_proj, dim=torch.Size([9728])
+angle=-0.011, layer=model.layers.25.mlp.down_proj, dim=torch.Size([2560])
+angle=-0.267, layer=model.layers.26.mlp.gate_proj, dim=torch.Size([9728])
+angle=0.000, layer=model.layers.26.mlp.up_proj, dim=torch.Size([9728])
+angle=-0.021, layer=model.layers.26.mlp.down_proj, dim=torch.Size([2560])
+angle=-0.295, layer=model.layers.27.mlp.gate_proj, dim=torch.Size([9728])
+angle=0.001, layer=model.layers.27.mlp.up_proj, dim=torch.Size([9728])
+angle=-0.010, layer=model.layers.27.mlp.down_proj, dim=torch.Size([2560])
+angle=-0.230, layer=model.layers.28.mlp.gate_proj, dim=torch.Size([9728])
+angle=-0.003, layer=model.layers.28.mlp.up_proj, dim=torch.Size([9728])
+angle=0.019, layer=model.layers.28.mlp.down_proj, dim=torch.Size([2560])
+angle=-0.295, layer=model.layers.29.mlp.gate_proj, dim=torch.Size([9728])
+angle=-0.002, layer=model.layers.29.mlp.up_proj, dim=torch.Size([9728])
+angle=0.005, layer=model.layers.29.mlp.down_proj, dim=torch.Size([2560])
+angle=-0.209, layer=model.layers.30.mlp.gate_proj, dim=torch.Size([9728])
+angle=0.016, layer=model.layers.30.mlp.up_proj, dim=torch.Size([9728])
+angle=0.002, layer=model.layers.30.mlp.down_proj, dim=torch.Size([2560])
+angle=-0.155, layer=model.layers.31.mlp.gate_proj, dim=torch.Size([9728])
+angle=-0.001, layer=model.layers.31.mlp.up_proj, dim=torch.Size([9728])
+angle=0.015, layer=model.layers.31.mlp.down_proj, dim=torch.Size([2560])

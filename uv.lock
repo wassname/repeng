@@ -135,6 +135,19 @@ wheels = [
 ]
 
 [[package]]
+name = "anycache"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "dill" },
+    { name = "filelock" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a2/2f/780bebd471b5a0fb9f53928d96726c7f17450d4d291a61e1b61988bab09c/anycache-2.4.0.tar.gz", hash = "sha256:99d3da200c7890fc9bba2c6c05470d34789483ed0115ee2885b72753aa235629", size = 11028, upload-time = "2025-04-03T07:33:07.91Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cd/bb/0750b6253968c97646a5da67d203fa219e2fe1be3ace5e7615a29544e4b9/anycache-2.4.0-py3-none-any.whl", hash = "sha256:8e0fa7ea06e6929446a7805e28780038353a75067a26a4f79df97e886c982ca7", size = 8247, upload-time = "2025-04-03T07:33:06.477Z" },
+]
+
+[[package]]
 name = "appnope"
 version = "0.1.4"
 source = { registry = "https://pypi.org/simple" }
@@ -2548,6 +2561,7 @@ name = "repeng"
 version = "0.5.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anycache" },
     { name = "baukit" },
     { name = "gguf" },
     { name = "jaxtyping" },
@@ -2581,6 +2595,7 @@ nbs = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anycache", specifier = ">=2.4.0" },
     { name = "baukit", git = "https://github.com/davidbau/baukit.git" },
     { name = "gguf", specifier = ">=0.13.0" },
     { name = "jaxtyping", specifier = ">=0.3.2" },

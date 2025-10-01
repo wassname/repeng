@@ -37,8 +37,7 @@ def reduce_tokens_w_attention(
     return (x * attn_mask).sum(dim) / attn_mask.sum(dim)
 
 def contrastive_steering_loss_with_ref(
-    hs_ref_pos,
-    hs_ref_neg,
+    pref_dir_ref,
     hs_pi_pos,
     hs_pi_neg,
     ref_pos_label_logp,
@@ -49,6 +48,8 @@ def contrastive_steering_loss_with_ref(
     coef=1.0,
     margin=3,
     boundary_order=4,
+    last_tokens_coherence=8,
+    last_tokens_proj=8,
 ):
     """
     Contrastive loss for training reversible steering adapters.
@@ -89,7 +90,7 @@ def contrastive_steering_loss_with_ref(
     """
     
     # Compute preference directions
-    pref_dir_ref = (hs_ref_pos - hs_ref_neg).detach()  # Reference direction (frozen)
+    # pref_dir_ref = (hs_ref_pos - hs_ref_neg).detach()  # Reference direction (frozen)
     pref_dir_pi = hs_pi_pos - hs_pi_neg  # Policy direction (learnable via adapter)
 
     # Normalize reference direction to unit vector
@@ -127,10 +128,13 @@ def contrastive_steering_loss_with_ref(
     loss_coherence_bounds = F.relu(coherence_gap)**boundary_order
 
     # Aggregate over tokens with attention weighting
-    loss_coherence_bounds = reduce_tokens_w_attention(loss_coherence_bounds, suffix_mask[:, :-1])
+    loss_coherence_bounds = reduce_tokens_w_attention(loss_coherence_bounds[-last_tokens_coherence:], cho_mask[:, :-1][-last_tokens_coherence:])
+
+    # loss_hs_proj weighted mean with attn
+    loss_hs_proj = reduce_tokens_w_attention(loss_hs_proj[-last_tokens_proj:], cho_mask[-last_tokens_proj:])
 
     # Combine losses
-    loss = loss_hs_proj.mean(1) + loss_coherence_bounds
+    loss = loss_hs_proj + loss_coherence_bounds
 
     assert torch.isfinite(loss).all(), "Non-finite loss encountered!"
 

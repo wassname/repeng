@@ -231,7 +231,7 @@ def baukit_dir_add_hook(
 
 
 @contextlib.contextmanager
-def steer(model: 'PreTrainedModel', vector: "ControlVector", coeff: float):
+def steer(model: 'PreTrainedModel', vector: "ControlVector", coeff: float, retain_output=False, retain_grad=True, **kwargs):
     """
     Usage:
         with steer(model, vector, coeff):
@@ -249,10 +249,11 @@ def steer(model: 'PreTrainedModel', vector: "ControlVector", coeff: float):
     with TraceDict(
         model, 
         layers=layers,
-        retain_output=False,
-        retain_grad=True,
-        detach=False,
+        retain_output=retain_output,
+        retain_grad=retain_grad,
+        # detach=False,
         edit_output=edit_fn,
+        **kwargs
     ) as td:
-        yield model
+        yield td
 
