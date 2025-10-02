@@ -299,15 +299,6 @@ again
 | down_proj_fisher_steer_reg3     |  nan    | nan    |          0.2 |    nan    |  nan    | nan    | nan    |
 | up_proj_fisher_steer_reg3       |  nan    | nan    |          0.4 |    nan    |  nan    | nan    | nan    |
 
-The 4x score difference between best MLP (13.99) and best attention (5.54) suggests MLP layers are fundamentally more steerable for this task. This aligns with them being the "thinking" components where values/preferences get encoded.
-
-Looking at your results:
-
-- up_proj_fisher_steer_reg2: score 13.99 (expanded space)
-- down_proj_fisher_steer_reg2: score 8.54 (residual space)
-  
-This suggests steering in the expanded MLP space is more effective than the residual stream, which makes sense because, there are more degrees of freedom to encode nuanced preferences. It might be more linear is it's more sparse, and it's also pre -nonlinearity so less saturated.
-
 # 2025-09-27 19:05:31 trying on more layer groups, and with IEP fisher matrix
 
 hmm for some reason it's got worse
@@ -345,21 +336,6 @@ hmm for some reason it's got worse
 | down_proj_fisher_steer_reg0                          |  -17.05 |   0.95 |         0.33 |      0.14 |    5.87 |  12.75 |  16    |
 | \.v_proj_svd_steer                                   |    2.22 |   0.85 |         0.78 |      0    |    5.84 |  16.75 |  21.88 |
 | \.v_proj_pca_diff                                    |    2.39 |   0.66 |         0.78 |      0.03 |    5.7  |  14.75 |  20.75 |
-| mlp\.up_proj|self_attn\.q_proj_svd_steer             |   -1.52 |   0.1  |         1    |      0.4  |    3.8  |  -3    |  21.5  |
-| \.mlp$_fisher_steer_reg4                             |   -1.92 |   0.52 |         0.78 |      0.07 |    3.55 |  15.5  |  21.38 |
-| mlp.gate_proj_fisher_steer_cov_reg1                  |    2.15 |   0.29 |         0.78 |      0.21 |    3.4  |  11.5  |  20.5  |
-| down_proj_fisher_steer_reg4                          |   -1.66 |   0.83 |         0.78 |      0    |    3.23 |  16.5  |  20.38 |
-| mlp.gate_proj_pca_diff_weighted                      |   -1.69 |   0.06 |         1    |      0.54 |    3.16 | -13    |  20.62 |
-| mlp\.up_proj|self_attn\.q_proj_pca_diff              |   -1.61 |   0.06 |         1    |      0.52 |    3.02 | -10.12 |  19.75 |
-| \.mlp$_fisher_steer_reg2                             |   -1.11 |   0.22 |         1    |      0.2  |    2.99 |   6.87 |  19    |
-| mlp.gate_proj_fisher_steer_reg4                      |    0.8  |   0.53 |         1    |      0.03 |    2.49 |  14.12 |  20    |
-| \.o_proj_fisher_steer_reg2_emp                       |    3.08 |   0.67 |         0.56 |      0.09 |    2.4  |  14.75 |  18.5  |
-| \.o_proj_fisher_steer_reg2                           |    0.75 |   0.25 |         1    |      0.17 |    1.65 |  11.63 |  20.25 |
-| mlp.up_proj_fisher_steer_reg2_emp                    |   -1.66 |   0.17 |         0.78 |      0.36 |    1.42 |  12    |  20.25 |
-| \.mlp$_svd_steer                                     |    1.31 |   0.34 |         0.78 |      0.17 |    1.35 |  15.5  |  20.5  |
-| down_proj_svd_steer                                  |    1.32 |   0.32 |         0.78 |      0.18 |    1.26 |  15.75 |  20.62 |
-| \.mlp$_pca_diff                                      |    1.11 |   0.23 |         0.78 |      0.27 |    0.85 |  15.5  |  20.88 |
-| \.mlp$_fisher_steer_reg0                             |   -9.18 |   0.19 |         0.33 |      0.71 |    0.78 |  14    |  18    |
 | mlp\.up_proj|self_attn\.q_proj_fisher_steer_dual     |    0.46 |   0.2  |         1    |      0.23 |    0.6  |  15    |  21.62 |
 | \.mlp$_fisher_steer_dual                             |   -0.36 |   0.47 |         1    |      0.04 |    0.43 |  16.75 |  19.25 |
 | \.q_proj_fisher_steer_dual                           |    0.38 |   0.22 |         1    |      0.2  |    0.38 |  14.75 |  19.25 |
@@ -419,121 +395,14 @@ hmm for some reason it's got worse
 | \.o_proj_fisher_steer_reg0                           |  nan    | nan    |         0.11 |    nan    |  nan    | nan    | nan    |
 | \.o_proj_fisher_steer_reg4_cov                       |  nan    | nan    |         0.11 |    nan    |  nan    | nan    | nan    |
 | down_proj_fisher_steer_reg4_cov                      |  nan    | nan    |         0.11 |    nan    |  nan    | nan    | nan    |
-| mlp.up_proj_fisher_steer_reg4_cov                    |  nan    | nan    |         0.22 |    nan    |  nan    | nan    | nan    |
 
 
-# 2025-09-30 15:45:00 - PCA_DIFF Init Puzzle: Loss Symmetry
+# 2025-10-02 14:16:16 - Decision: Freeze PCA Directions for Contrastive Steering
 
-**Observation**: When initializing contrastive adapter training with PCA_DIFF vectors, initial losses show perfect symmetry (0.758 vs -0.758) but aren't near-zero as expected for a "good" init.
+Decision: Freeze PCA directions as references. Align signs and select loss layers (top by corr or every 4) via forward passes on batches (reuse eval func). Train adapter (LoRA/ETHER/ROAD/BOFT or additive vectors) using these refs in contrastive loss.
 
-**The Puzzle**:
-- PCA_DIFF should give strong init (finds max variance direction in `hs_pos - hs_neg`)
-- But initial `loss_hs_proj` is ±0.758, not ~0
-- This means PCA direction has ~38% alignment with reference - **not orthogonal, but not aligned either**
-- For `coef=1`: high loss (needs to learn alignment)
-- For `coef=-1`: negative loss (partial anti-alignment)
+Rationale: Builds on prior experiments (e.g., MLP layers more steerable). Freezing + alignment avoids gaming/divergence while enabling backprop to maximize hs variation along refs. Potential to outperform plain steering (e.g., +10-20% sep) by adapting to task dynamics, with reversible coeff flips.
 
-**Empirical confirmation** (cosine similarity between PCA and batch reference):
-```
-gate_proj (dim=9728): angles ≈ ±0.01 to ±0.30 (nearly orthogonal)
-up_proj   (dim=9728): angles ≈ ±0.02 (nearly orthogonal)  
-down_proj (dim=2560): angles ≈ ±0.05 (slightly higher, still mostly orthogonal)
-```
+Context: For contrastive adapter training in LLM steering (e.g., honest/dishonest). Addresses PCA/ref mismatch and layer reversal issues from previous runs.
 
-**Dimensionality effect**: 
-- Higher alignment in lower-dim space (down_proj: 2560 vs gate/up: 9728)
-- Two possible explanations:
-  1. **Fewer degrees of freedom**: In 2560-dim, random vectors have higher expected cosine similarity than in 9728-dim (curse of dimensionality in reverse). Less room for orthogonal subspaces.
-  2. **Residual stream structure**: down_proj writes to residual stream (2560-dim), which carries all information forward. This bottleneck might force PCA and reference to share more structure - both must compress through same low-dim channel. gate/up_proj operate in expanded MLP space (9728-dim) with more room for independent subspaces.
 
-**Why the mismatch?**
-1. **Different subspaces**: PCA finds global max-variance direction across full dataset; reference is per-batch instantaneous direction. These can be in different subspaces of the high-dim hidden space.
-2. **Batch composition**: Reference direction depends on which pos/neg pairs are in current batch. PCA averages over all pairs → different orientation.
-3. **Noise/multi-dimensional structure**: Layer -3 hidden states have many orthogonal components (syntax, semantics, etc). PCA picks principal component; reference might emphasize different dimensions per batch.
-
-**Key insight**: 
-- If PCA were just sign-flipped, you'd see strong reverse steering (large negative logratio). 
-- Instead, weak effect suggests PCA direction is **nearly orthogonal** to reference - captures *some* honest/dishonest variance but in a different subspace.
-- The near-zero angles confirm: PCA found a valid separation axis, but not the one the loss targets.
-
-**Speculation**: 
-- PCA (unsupervised, global) finds "average honest direction" across dataset
-- Loss (supervised, local) wants "batch-specific honest direction aligned to reference"
-- These differ because: (a) batch variance, (b) PCA ignores coherence (just maximizes separation), (c) high-dim space has many valid separation axes
-- Lower-dim spaces (residual stream) force more alignment due to information bottleneck
-
-**Next steps**: 
-- Try PCA on MLP up_proj (more linear, less entangled) - but expect similar orthogonality
-- Use gradient-based init (`svd_gradient`) - directly optimizes toward loss landscape
-- Consider: maybe PCA init isn't the problem - the loss itself might need to be more flexible about which separation axis to use
-- Add PCA sign/alignment correction: project onto reference, rescale to maximize `|pca_dir @ ref_dir|`
-
-Cosine between pref_dir on activations, and PCA direction on same activations:
-
-not it's highest in the smaller dm
-angle=-0.003, layer=model.layers.10.mlp.gate_proj, dim=torch.Size([9728])
-angle=-0.028, layer=model.layers.10.mlp.up_proj, dim=torch.Size([9728])
-angle=0.009, layer=model.layers.10.mlp.down_proj, dim=torch.Size([2560])
-angle=-0.144, layer=model.layers.11.mlp.gate_proj, dim=torch.Size([9728])
-angle=-0.006, layer=model.layers.11.mlp.up_proj, dim=torch.Size([9728])
-angle=-0.003, layer=model.layers.11.mlp.down_proj, dim=torch.Size([2560])
-angle=-0.145, layer=model.layers.12.mlp.gate_proj, dim=torch.Size([9728])
-angle=0.008, layer=model.layers.12.mlp.up_proj, dim=torch.Size([9728])
-angle=-0.011, layer=model.layers.12.mlp.down_proj, dim=torch.Size([2560])
-angle=-0.012, layer=model.layers.13.mlp.gate_proj, dim=torch.Size([9728])
-angle=-0.009, layer=model.layers.13.mlp.up_proj, dim=torch.Size([9728])
-angle=0.010, layer=model.layers.13.mlp.down_proj, dim=torch.Size([2560])
-angle=0.124, layer=model.layers.14.mlp.gate_proj, dim=torch.Size([9728])
-angle=0.010, layer=model.layers.14.mlp.up_proj, dim=torch.Size([9728])
-angle=0.054, layer=model.layers.14.mlp.down_proj, dim=torch.Size([2560])
-angle=0.076, layer=model.layers.15.mlp.gate_proj, dim=torch.Size([9728])
-angle=0.021, layer=model.layers.15.mlp.up_proj, dim=torch.Size([9728])
-angle=0.010, layer=model.layers.15.mlp.down_proj, dim=torch.Size([2560])
-angle=0.049, layer=model.layers.16.mlp.gate_proj, dim=torch.Size([9728])
-angle=0.011, layer=model.layers.16.mlp.up_proj, dim=torch.Size([9728])
-angle=0.011, layer=model.layers.16.mlp.down_proj, dim=torch.Size([2560])
-angle=0.018, layer=model.layers.17.mlp.gate_proj, dim=torch.Size([9728])
-angle=-0.001, layer=model.layers.17.mlp.up_proj, dim=torch.Size([9728])
-angle=0.019, layer=model.layers.17.mlp.down_proj, dim=torch.Size([2560])
-angle=0.011, layer=model.layers.18.mlp.gate_proj, dim=torch.Size([9728])
-angle=0.004, layer=model.layers.18.mlp.up_proj, dim=torch.Size([9728])
-angle=0.024, layer=model.layers.18.mlp.down_proj, dim=torch.Size([2560])
-angle=-0.076, layer=model.layers.19.mlp.gate_proj, dim=torch.Size([9728])
-angle=0.010, layer=model.layers.19.mlp.up_proj, dim=torch.Size([9728])
-angle=-0.003, layer=model.layers.19.mlp.down_proj, dim=torch.Size([2560])
-angle=0.028, layer=model.layers.20.mlp.gate_proj, dim=torch.Size([9728])
-angle=-0.003, layer=model.layers.20.mlp.up_proj, dim=torch.Size([9728])
-angle=0.013, layer=model.layers.20.mlp.down_proj, dim=torch.Size([2560])
-angle=0.075, layer=model.layers.21.mlp.gate_proj, dim=torch.Size([9728])
-angle=0.005, layer=model.layers.21.mlp.up_proj, dim=torch.Size([9728])
-angle=0.001, layer=model.layers.21.mlp.down_proj, dim=torch.Size([2560])
-angle=0.032, layer=model.layers.22.mlp.gate_proj, dim=torch.Size([9728])
-angle=-0.020, layer=model.layers.22.mlp.up_proj, dim=torch.Size([9728])
-angle=0.024, layer=model.layers.22.mlp.down_proj, dim=torch.Size([2560])
-angle=0.077, layer=model.layers.23.mlp.gate_proj, dim=torch.Size([9728])
-angle=-0.016, layer=model.layers.23.mlp.up_proj, dim=torch.Size([9728])
-angle=-0.000, layer=model.layers.23.mlp.down_proj, dim=torch.Size([2560])
-angle=-0.050, layer=model.layers.24.mlp.gate_proj, dim=torch.Size([9728])
-angle=-0.003, layer=model.layers.24.mlp.up_proj, dim=torch.Size([9728])
-angle=0.031, layer=model.layers.24.mlp.down_proj, dim=torch.Size([2560])
-angle=-0.166, layer=model.layers.25.mlp.gate_proj, dim=torch.Size([9728])
-angle=0.012, layer=model.layers.25.mlp.up_proj, dim=torch.Size([9728])
-angle=-0.011, layer=model.layers.25.mlp.down_proj, dim=torch.Size([2560])
-angle=-0.267, layer=model.layers.26.mlp.gate_proj, dim=torch.Size([9728])
-angle=0.000, layer=model.layers.26.mlp.up_proj, dim=torch.Size([9728])
-angle=-0.021, layer=model.layers.26.mlp.down_proj, dim=torch.Size([2560])
-angle=-0.295, layer=model.layers.27.mlp.gate_proj, dim=torch.Size([9728])
-angle=0.001, layer=model.layers.27.mlp.up_proj, dim=torch.Size([9728])
-angle=-0.010, layer=model.layers.27.mlp.down_proj, dim=torch.Size([2560])
-angle=-0.230, layer=model.layers.28.mlp.gate_proj, dim=torch.Size([9728])
-angle=-0.003, layer=model.layers.28.mlp.up_proj, dim=torch.Size([9728])
-angle=0.019, layer=model.layers.28.mlp.down_proj, dim=torch.Size([2560])
-angle=-0.295, layer=model.layers.29.mlp.gate_proj, dim=torch.Size([9728])
-angle=-0.002, layer=model.layers.29.mlp.up_proj, dim=torch.Size([9728])
-angle=0.005, layer=model.layers.29.mlp.down_proj, dim=torch.Size([2560])
-angle=-0.209, layer=model.layers.30.mlp.gate_proj, dim=torch.Size([9728])
-angle=0.016, layer=model.layers.30.mlp.up_proj, dim=torch.Size([9728])
-angle=0.002, layer=model.layers.30.mlp.down_proj, dim=torch.Size([2560])
-angle=-0.155, layer=model.layers.31.mlp.gate_proj, dim=torch.Size([9728])
-angle=-0.001, layer=model.layers.31.mlp.up_proj, dim=torch.Size([9728])
-angle=0.015, layer=model.layers.31.mlp.down_proj, dim=torch.Size([2560])

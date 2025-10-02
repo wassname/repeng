@@ -46,7 +46,7 @@ def contrastive_steering_loss_with_ref(
     p=2,
     eps=1e-6,
     coef=1.0,
-    margin=3,
+    margin=3.0,
     boundary_order=4,
     last_tokens_coherence=8,
     last_tokens_proj=8,
@@ -122,7 +122,7 @@ def contrastive_steering_loss_with_ref(
     # coherence_gap = 
     
     # Soft clamp to prevent extreme values on one particular token, which is one way to game the loss
-    coherence_gap = soft_clamp(coherence_gap, -5.0, 5.0, sharpness=1.0)
+    coherence_gap = soft_clamp(coherence_gap, -10.0, 10.0, sharpness=1.0)
     
     # Quartic penalty for sharp boundary (consider reducing to quadratic for stability)
     loss_coherence_bounds = F.relu(coherence_gap)**boundary_order
