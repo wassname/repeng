@@ -251,9 +251,18 @@ class ControlVector:
         return self.__mul__(1 / other)
     
 
-def PCAWeighted(train, weights=None):
+def PCAWeighted(train, weights=None, n_components=1) -> torch.Tensor:
     """
-    https://stats.stackexchange.com/questions/113485/weighted-principal-components-analysis\
+    Weighted PCA via SVD. Returns first principal component direction.
+    
+    Args:
+        train: [n, d] tensor
+        weights: [n] tensor of sample weights (normalized to sum=1 internally)
+    
+    Returns:
+        [d] tensor, first PC direction
+    
+    https://stats.stackexchange.com/questions/113485/weighted-principal-components-analysis
     """
     if weights is not None:
         weights_flat = weights.flatten().clone()
@@ -271,9 +280,15 @@ def PCAWeighted(train, weights=None):
     
     # Torch SVD (full_matrices=False for efficiency)
     U, S, Vt = torch.linalg.svd(train_weighted_torch, full_matrices=False)
+
+    # top K dirs?
+    # (U = torch.stack([v1,v2,v3], dim=1).T;
+
+    # U, Vt = svd_flip(U.cpu().numpy(), Vt.cpu().numpy(), u_based_decision=False)
     
     # First PC direction
-    direction = Vt[0]#.cpu()
+    direction = Vt[:n_components] # [k, d]
+    
     return direction
 
 
@@ -305,26 +320,19 @@ def _choose_sign_from_grads(direction: torch.Tensor, grad_matrix: torch.Tensor) 
     return v if score >= 0 else -v
 
 def choose_sign_from_hiddens(direction: torch.Tensor, hiddens: torch.Tensor) -> torch.Tensor:
+    """Flip direction so positives project higher than negatives on average."""
     projected_hiddens = project_onto_direction(hiddens, direction)
-    len_inputs = projected_hiddens.shape[0]//2
-
+    
     # order is [positive, negative, positive, negative, ...]
-    positive_smaller_mean = torch.tensor(
-        [
-            projected_hiddens[i] < projected_hiddens[i + 1]
-            for i in range(0, len_inputs * 2, 2)
-        ]
-    ).float().mean()
-    positive_larger_mean = torch.tensor(
-        [
-            projected_hiddens[i] > projected_hiddens[i + 1]
-            for i in range(0, len_inputs * 2, 2)
-        ]
-    ).float().mean()
-
-    if positive_smaller_mean > positive_larger_mean:  # type: ignore
-        return -direction
-    return direction
+    # Compare pos/neg pairs directly (more efficient than list comprehension)
+    pos_proj = projected_hiddens[::2]  # [num_pairs]
+    neg_proj = projected_hiddens[1::2]  # [num_pairs]
+    
+    # Fraction of pairs where positive projects higher than negative
+    frac_correct = (pos_proj > neg_proj).float().mean()
+    
+    # Flip if majority of pairs are backwards (pos projects lower than neg)
+    return direction if frac_correct >= 0.5 else -direction
 
 def read_representations(
     act: dict[str, Tensor],
@@ -332,6 +340,8 @@ def read_representations(
     grads: dict[str, Tensor | None],
     feat_grad_norms: dict[str, Tensor | None] = None,
     method: typing.Literal["pca_diff", "pca_center", "umap", "pca_diff_weighted", "pca_center_weighted", "svd_gradient", "fisher_steer", "hvp_steer"] = "pca_diff",
+    n_components: int = 1,
+    use_scipy: bool = True,  # SciPy is often faster than PyTorch GPU SVD for moderate matrix sizes
 ) -> dict[str, np.ndarray]:
     
     hidden_layers= list(act.keys())
@@ -356,6 +366,7 @@ def read_representations(
             directions[layer] = svd_steering(grad_matrix)
 
             # TODO importance sampling from logprobs
+            directions[layer] = _choose_sign_from_grads(directions[layer], grad_matrix).unsqueeze(0)  # [1, d]
         
         elif "fisher_steer" in method:
             low_dim=None
@@ -411,7 +422,7 @@ def read_representations(
                 )
 
             # # make sure the direction has positive personas as +ve (otherwise flip)
-            directions[layer] = _choose_sign_from_grads(directions[layer], grad_matrix)
+            directions[layer] = _choose_sign_from_grads(directions[layer], grad_matrix).unsqueeze(0)  # [1, d]
 
         elif method == "hvp_steer":
             # Down-project for feasibility
@@ -441,10 +452,13 @@ def read_representations(
                 return hvp @ P.T if low_dim < dim else hvp  # Up-project
             
             direction = compute_hvp(mean_grad_proj, grad_matrix)
-            directions[layer] = _choose_sign_from_grads(direction, grad_matrix)
+            directions[layer] = _choose_sign_from_grads(direction, grad_matrix).unsqueeze(0)  # [1, d]
 
         else: # PCA-based methods
+            # run PCA on difference vectors between positive and negative examples
+            train = h[::2] - h[1::2]
             if 'weighted' in method:
+                # importance sampling weights from logprobs, higher prob = more online data
                 # Normalize logprobs to [0, 2]: Higher prob = higher weight (focus on coherent samples)
                 # For pairs, use difference or average; here, weight by pos logprob (more honest = higher weight) 
                 pair_probs = logprobs.view(-1, 2).mean(1)  # Average logprob per pair [n_pairs]
@@ -453,14 +467,18 @@ def read_representations(
                 # Reshape to match train (interleave for pos/neg, but since train is diff, use pair weights)
                 # train will be defined below; just repeat to match pairwise diffs length
                 # weights used with train = h[::2] - h[1::2], so shapes match (n_pairs,)
+                components = PCAWeighted(train, weights=weights, n_components=n_components)
             else:
-                weights = None
-            # run PCA on difference vectors between positive and negative examples
-            train = h[::2] - h[1::2]
-            directions[layer] = PCAWeighted(train, weights=weights)
+                # Doesn't have weighting but is otherwise better (faster, tracks signs, 
+                pca = PCA(n_components=n_components)  # NEW: Use n_components
+                components = pca.fit(train.numpy()).components_[:n_components]  # (K, d)
+                components = torch.from_numpy(components)
+            
+            # NEW: Multi-comp sign flip (per component)
+            for i in range(n_components):
+                components[i] = choose_sign_from_hiddens(components[i], h)
 
-            # make sure the direction has positive personas as +ve (otherwise flip)
-            directions[layer] = choose_sign_from_hiddens(directions[layer], h)
+            directions[layer] = components  # Now (K, d) or (d,)
 
     return directions
 

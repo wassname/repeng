@@ -18,11 +18,35 @@ from functools import partial
 from peft.tuners.tuners_utils import BaseTunerLayer
 from peft.tuners.ia3.layer import IA3Layer
 from peft.tuners.vera.layer import VeraLayer
+from peft.tuners.road.layer import RoadLayer
+from peft.tuners.lora.layer import LoraLayer
 
 
 class AdapterScaler:
     """Handles scaling of adapter parameters during forward passes."""
-    
+
+    @staticmethod
+    def scale_road_params(
+        module: RoadLayer,
+        args: Tuple,
+        kwargs: Dict[str, Any],
+        adapter_name: str,
+        coeff: float,
+        scale_param: str,
+        originals: List[Tuple]
+    ) -> Tuple:
+        """Scale ROAD adapter parameters."""
+        param_attr = 'road_theta' if scale_param == 'theta' else 'road_alpha'
+        param_dict = getattr(module, param_attr)
+        
+        if adapter_name in param_dict:
+            original = param_dict[adapter_name]
+            param_dict[adapter_name] = original * coeff
+            originals.append((param_dict, adapter_name, original))
+        
+        return (args, kwargs)
+
+
     @staticmethod
     def scale_ia3_params(
         module: IA3Layer,
@@ -56,6 +80,8 @@ class AdapterScaler:
         to learn the steering direction. Gradients flow back through the multiplication
         to the original Parameter objects tracked by the optimizer.
         """
+
+        # TODO not sure if I should do this param too
         # if hasattr(module, 'vera_lambda_d') and adapter_name in module.vera_lambda_d:
         #     # Store original ParameterDict
         #     originals.append((module, 'vera_lambda_d', module.vera_lambda_d))
@@ -80,6 +106,32 @@ class AdapterScaler:
             })
         
 
+    @staticmethod
+    def scale_lora_params(
+        module: LoraLayer,
+        args: Tuple,
+        kwargs: Dict[str, Any],
+        adapter_name: str,
+        coeff: float,
+        originals: List[Tuple]
+    ) -> Tuple:
+        """Scale LoRA adapter parameters (A.weight and B.weight) for reversible steering."""
+        # LoRA has lora_A and lora_B as ParameterDicts of nn.Linear modules
+        if hasattr(module, 'lora_A') and adapter_name in module.lora_A:
+            lora_A_linear = module.lora_A[adapter_name]
+            original_weight_A = lora_A_linear.weight.data
+            # Non-in-place: create new tensor
+            lora_A_linear.weight.data = original_weight_A * coeff
+            originals.append((lora_A_linear.weight, None, original_weight_A))
+        
+        if hasattr(module, 'lora_B') and adapter_name in module.lora_B:
+            lora_B_linear = module.lora_B[adapter_name]
+            original_weight_B = lora_B_linear.weight.data
+            # Non-in-place: create new tensor
+            lora_B_linear.weight.data = original_weight_B * coeff
+            originals.append((lora_B_linear.weight, None, original_weight_B))
+        
+        return (args, kwargs)
 
 @contextmanager
 def AdapterSteer(

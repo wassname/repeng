@@ -405,4 +405,7 @@ Rationale: Builds on prior experiments (e.g., MLP layers more steerable). Freezi
 
 Context: For contrastive adapter training in LLM steering (e.g., honest/dishonest). Addresses PCA/ref mismatch and layer reversal issues from previous runs.
 
+# 2025-10-02 21:21:43
+
+Fixme something is changing the base model right now
 

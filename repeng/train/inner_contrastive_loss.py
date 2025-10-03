@@ -93,17 +93,21 @@ def contrastive_steering_loss_with_ref(
     # pref_dir_ref = (hs_ref_pos - hs_ref_neg).detach()  # Reference direction (frozen)
     pref_dir_pi = hs_pi_pos - hs_pi_neg  # Policy direction (learnable via adapter)
 
-    # Normalize reference direction to unit vector
-    pref_dir_ref_unit = safe_norm(pref_dir_ref, p=p, dim=-1, eps=eps)
+    # Always treat as subspace (k, d); normalize rows to unit basis
+    U = safe_norm(pref_dir_ref, p=p, dim=-1, eps=eps)  # (k, d)
 
-    # Project policy direction onto reference direction
-    signed_proj = torch.sum(pref_dir_pi * pref_dir_ref_unit, dim=-1)
-    
+    # Project the diff to subspace coords: pref_dir_pi @ U.T  (..., d) @ (d, k) -> (..., k)
+    signed_proj = torch.einsum("...d,kd->...k", pref_dir_pi, U)  # (b t, k)
+
+    # # Signed proj: Norm of projected diff (magnitude of separation in subspace)
+    # # For signed alternative: .mean(dim=-1), but norm emphasizes strength
+    # signed_proj = torch.norm(pref_proj, dim=-1)  # (b t,)
+
     # Scale projection by reference norm to get loss in predictable [0,2] range
     # When coef=1: maximize projection (minimize negative projection)
     # When coef=-1: minimize projection (maximize negative projection)
-    ref_loss_hs_proj = torch.norm(pref_dir_ref, p=p, dim=-1) + 1
-    loss_hs_proj = -signed_proj / ref_loss_hs_proj # scale loss as ratio
+    ref_loss_hs_proj = torch.norm(U, dim=-1).sum() + 1  # Sum basis norms for multi
+    loss_hs_proj = -signed_proj.max(-1)[0] / ref_loss_hs_proj  # scale loss as ratio
     loss_hs_proj = coef * loss_hs_proj  # Reverse loss direction based on intervention
     
     # Coherence constraint (doesn't reverse with coefficient - always enforced)
@@ -142,6 +146,8 @@ def contrastive_steering_loss_with_ref(
         "loss_hs_proj": loss_hs_proj,
         "loss_coherence_bounds": loss_coherence_bounds,
         "loss_total": loss,
+        "dppx": (logp_pos - baseline_logp).mean(),
+        "proj": signed_proj.mean() / coef,
     }
 
 

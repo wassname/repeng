@@ -210,18 +210,32 @@ def baukit_dir_add_hook(
     output: Float[Tensor, "... d_act"],
     layer: str,
     inputs,
-    directions: Dict[str, Float[Tensor, "... d_act"]],
+    directions: Dict[str, Float[Tensor, "k d_act"]],
     coeff: float = 1.0,
 ):
     """
-    edit layer output by adding, used in baukit
+    Edit layer output by adding a scaled steering direction.
+    
+    For direction (k, d):
+    - Sums k components to single (d,) vector
+    - Applies: hs_new = hs + coeff * delta
+    - Linear scaling: coeff=0 (no steering), coeff=1 (baseline), coeff=2 (double)
     """
     if isinstance(output, tuple):
         modified = output[0]
     else:
         modified = output
-    direction = directions[layer] * coeff#.to(device=output.device, dtype=output.dtype) * coeff
-    modified = modified + direction
+    direction = directions[layer]  # (k, d)
+    
+    # Sum k directions to single vector (simple linear combination)
+    if direction.dim() == 2:
+        delta = direction.sum(dim=0)  # (k, d) -> (d,)
+    else:
+        delta = direction  # Already (d,) for k=1
+    
+    # Linear additive scaling
+    modified = modified + coeff * delta
+    
     if isinstance(output, tuple):
         output = (modified,) + output[1:]
     else:

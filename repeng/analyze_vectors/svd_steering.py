@@ -28,7 +28,7 @@ def svd_steering(
     # Center the gradients
     grad_matrix = grad_matrix - grad_matrix.mean(dim=0, keepdim=True)
 
-    # Apply SVD to the centered gradient matrix
+    # Apply SVD to the centered gradient matrix (full_matrices=False is faster for extracting 1st PC)
     _U, _S, Vh = svd(grad_matrix, full_matrices=False)
 
     # The first right singular vector is the direction of highest variance
