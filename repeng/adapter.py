@@ -25,26 +25,34 @@ from peft.tuners.lora.layer import LoraLayer
 class AdapterScaler:
     """Handles scaling of adapter parameters during forward passes."""
 
-    @staticmethod
-    def scale_road_params(
-        module: RoadLayer,
-        args: Tuple,
-        kwargs: Dict[str, Any],
-        adapter_name: str,
-        coeff: float,
-        scale_param: str,
-        originals: List[Tuple]
-    ) -> Tuple:
-        """Scale ROAD adapter parameters."""
-        param_attr = 'road_theta' if scale_param == 'theta' else 'road_alpha'
-        param_dict = getattr(module, param_attr)
+    # Disabled as it's not additively reversible, reversing alpha give negative activations that the model can't handle
+    # @staticmethod
+    # def scale_road_params(
+    #     module: RoadLayer,
+    #     adapter_name: str,
+    #     coeff: float,
+    #     originals: List[Tuple],
+    # ) -> None:
+    #     """Scale ROAD adapter alpha parameters for reversible steering.
         
-        if adapter_name in param_dict:
-            original = param_dict[adapter_name]
-            param_dict[adapter_name] = original * coeff
-            originals.append((param_dict, adapter_name, original))
+    #     Only scales road_alpha (magnitude), not road_theta (rotation angle).
         
-        return (args, kwargs)
+    #     Rationale: road_theta is an angle parameter used in cos(theta) and sin(theta).
+    #     Scaling angles doesn't give reversible behavior - cos(-theta) = cos(theta).
+    #     road_alpha is the magnitude scaling that should be reversed for steering.
+    #     The rotation matrix is [α*cos(θ), -α*sin(θ); α*sin(θ), α*cos(θ)], so scaling
+    #     α by coeff scales the entire transformation linearly.
+
+    #        https://arxiv.org/pdf/2409.00119.
+    #        https://github.com/huggingface/peft/blob/6030f9160ed2fc17220f6f41382a66f1257b6a93/src/peft/tuners/road/layer.py
+    #     """
+    #     if hasattr(module, 'road_alpha') and adapter_name in module.road_alpha:
+    #         originals.append((module, 'road_alpha', module.road_alpha))
+            
+    #         object.__setattr__(module, 'road_alpha', {
+    #             k: v * coeff if k == adapter_name else v
+    #             for k, v in module.road_alpha.items()
+    #         })
 
 
     @staticmethod
@@ -73,25 +81,14 @@ class AdapterScaler:
         coeff: float,
         originals: List[Tuple]
     ) -> Tuple:
-        """Scale VeRA adapter parameters (lambda_d and lambda_b) for reversible steering.
+        """Scale VeRA adapter parameters for reversible steering.
         
-        Scales both lambda_d and lambda_b by coeff. Since they multiply together in the
-        forward pass, this gives an overall scaling of coeff^2, but allows both parameters
-        to learn the steering direction. Gradients flow back through the multiplication
-        to the original Parameter objects tracked by the optimizer.
+        Only scales lambda_b (output scaling), not lambda_d (bottleneck scaling).
+        
+        Forward pass: result += lambda_b * (B @ (lambda_d * (A @ x)))
+        Both are element-wise multipliers, so scaling both gives coeff^2 scaling.
+        We only scale lambda_b to get linear coeff scaling for reversibility.
         """
-
-        # TODO not sure if I should do this param too
-        # if hasattr(module, 'vera_lambda_d') and adapter_name in module.vera_lambda_d:
-        #     # Store original ParameterDict
-        #     originals.append((module, 'vera_lambda_d', module.vera_lambda_d))
-            
-        #     # Replace with new dict containing scaled tensors
-        #     # Use object.__setattr__ to bypass nn.Module's type checking
-        #     object.__setattr__(module, 'vera_lambda_d', {
-        #         k: v * coeff if k == adapter_name else v
-        #         for k, v in module.vera_lambda_d.items()
-        #     })
         
         if hasattr(module, 'vera_lambda_b') and adapter_name in module.vera_lambda_b:
             # Store original ParameterDict
@@ -101,37 +98,31 @@ class AdapterScaler:
             # Computation graph: scaled_tensor = original_param * coeff
             # Gradients will flow back through multiplication to original_param
             object.__setattr__(module, 'vera_lambda_b', {
-                k: v * coeff if k == adapter_name else v
+                k: v * -coeff if k == adapter_name else v
                 for k, v in module.vera_lambda_b.items()
             })
         
 
-    @staticmethod
-    def scale_lora_params(
-        module: LoraLayer,
-        args: Tuple,
-        kwargs: Dict[str, Any],
-        adapter_name: str,
-        coeff: float,
-        originals: List[Tuple]
-    ) -> Tuple:
-        """Scale LoRA adapter parameters (A.weight and B.weight) for reversible steering."""
-        # LoRA has lora_A and lora_B as ParameterDicts of nn.Linear modules
-        if hasattr(module, 'lora_A') and adapter_name in module.lora_A:
-            lora_A_linear = module.lora_A[adapter_name]
-            original_weight_A = lora_A_linear.weight.data
-            # Non-in-place: create new tensor
-            lora_A_linear.weight.data = original_weight_A * coeff
-            originals.append((lora_A_linear.weight, None, original_weight_A))
+    # @staticmethod
+    # def scale_lora_params(
+    #     module: LoraLayer,
+    #     adapter_name: str,
+    #     coeff: float,
+    #     originals: List[Tuple]
+    # ) -> None:
+    #     """Scale LoRA adapter parameters (A.weight and B.weight) for reversible steering."""
+    #     if hasattr(module, 'lora_A') and adapter_name in module.lora_A:
+    #         lora_A_linear = module.lora_A[adapter_name]
+    #         # FIXME: is this an in place operation? Will the grad graph and the optimiser work toghet to track and update it right?
+    #         original_weight_A = lora_A_linear.weight.data
+    #         lora_A_linear.weight.data = original_weight_A * coeff
+    #         originals.append((lora_A_linear.weight, None, original_weight_A))
         
-        if hasattr(module, 'lora_B') and adapter_name in module.lora_B:
-            lora_B_linear = module.lora_B[adapter_name]
-            original_weight_B = lora_B_linear.weight.data
-            # Non-in-place: create new tensor
-            lora_B_linear.weight.data = original_weight_B * coeff
-            originals.append((lora_B_linear.weight, None, original_weight_B))
-        
-        return (args, kwargs)
+    #     if hasattr(module, 'lora_B') and adapter_name in module.lora_B:
+    #         lora_B_linear = module.lora_B[adapter_name]
+    #         original_weight_B = lora_B_linear.weight.data
+    #         lora_B_linear.weight.data = original_weight_B * coeff
+    #         originals.append((lora_B_linear.weight, None, original_weight_B))
 
 @contextmanager
 def AdapterSteer(
@@ -173,7 +164,6 @@ def AdapterSteer(
             yield
         return
     
-    hooks = []
     originals = []
     
     try:
@@ -182,12 +172,15 @@ def AdapterSteer(
                 AdapterScaler.scale_ia3_params(module=module, adapter_name=adapter_name, coeff=coeff, originals=originals)
             elif isinstance(module, VeraLayer) and adapter_name in module.vera_lambda_b:
                 AdapterScaler.scale_vera_params(module=module, adapter_name=adapter_name, coeff=coeff, originals=originals)
+            elif isinstance(module, RoadLayer) and adapter_name in module.active_adapters:
+                AdapterScaler.scale_road_params(module=module, adapter_name=adapter_name, coeff=coeff, originals=originals)
+            elif isinstance(module, LoraLayer) and adapter_name in module.active_adapters:
+                AdapterScaler.scale_lora_params(module=module, adapter_name=adapter_name, coeff=coeff, originals=originals)
         
         yield
         
     finally:
         # Restore original ParameterDicts before backward pass
-        # Format: (module, attr_name, original_param_dict)
         for module, attr_name, original_param_dict in originals:
             setattr(module, attr_name, original_param_dict)
 

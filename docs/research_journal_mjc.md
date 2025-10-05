@@ -409,3 +409,36 @@ Context: For contrastive adapter training in LLM steering (e.g., honest/dishones
 
 Fixme something is changing the base model right now
 
+# 2025-10-05 15:00:23
+
+key insight.
+
+**The fundamental issue**:
+- **Multiplicative methods** (IA3, VeRA, ROAD α): Scale activations by learned values
+- When you negate (`coeff=-1`), you get **negative activations** → distribution shift → model breaks
+- Even IA3's `(λ-1)*coeff+1` only works because it stays near 1.0 (small perturbations)
+
+**Additive methods** (LoRA, DeLoRA): Add learned deltas to weights
+- `W' = W + ΔW` where `ΔW = BA` (LoRA)
+- With coeff: `W' = W + coeff·ΔW`
+- `coeff=-1`: `W' = W - ΔW` → **just subtracts instead of adds**
+- Activations stay in normal range! Just steered differently.
+
+**DeLoRA specifically**:
+```python
+ΔW = λ · (BA / ||BA||_F)  # Normalized direction + magnitude
+# coeff=1:  W + λ·direction
+# coeff=-1: W - λ·direction  
+# Activations stay reasonable, just steered opposite direction
+```
+
+**Why DeLoRA > LoRA for your case**:
+- LoRA: Direction and magnitude entangled in BA matrices
+- DeLoRA: Direction (BA/||BA||) and magnitude (λ) decoupled
+- Scaling λ by coeff is cleaner than scaling entire BA product
+
+1. **DeLoRA** (when PR merges): Additive + decoupled → ideal for reversible steering
+2. **LoRA** (fix your gradient flow bug): Additive, works but not decoupled
+3. **VeRA**: Multiplicative but with small λ around 0 → less distribution shift
+4. **ROAD**: Multiplicative, struggles with negative scaling 
+

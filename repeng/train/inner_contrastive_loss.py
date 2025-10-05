@@ -2,7 +2,7 @@ from jaxtyping import Float, Int
 from torch import Tensor
 import torch
 import torch.nn.functional as F
-from einops import rearrange, repeat
+from einops import rearrange, repeat, reduce
 
 def safe_norm(x: Float[Tensor, "batch"], p: int = 2, dim: int = -1, eps: float = 1e-9):
     """
@@ -107,7 +107,7 @@ def contrastive_steering_loss_with_ref(
     # When coef=1: maximize projection (minimize negative projection)
     # When coef=-1: minimize projection (maximize negative projection)
     ref_loss_hs_proj = torch.norm(U, dim=-1).sum() + 1  # Sum basis norms for multi
-    loss_hs_proj = -signed_proj.max(-1)[0] / ref_loss_hs_proj  # scale loss as ratio
+    loss_hs_proj = - reduce(signed_proj, 'b t k -> b t', 'mean') / ref_loss_hs_proj  # Alternative: mean of signed proj
     loss_hs_proj = coef * loss_hs_proj  # Reverse loss direction based on intervention
     
     # Coherence constraint (doesn't reverse with coefficient - always enforced)

@@ -280,11 +280,6 @@ def PCAWeighted(train, weights=None, n_components=1) -> torch.Tensor:
     
     # Torch SVD (full_matrices=False for efficiency)
     U, S, Vt = torch.linalg.svd(train_weighted_torch, full_matrices=False)
-
-    # top K dirs?
-    # (U = torch.stack([v1,v2,v3], dim=1).T;
-
-    # U, Vt = svd_flip(U.cpu().numpy(), Vt.cpu().numpy(), u_based_decision=False)
     
     # First PC direction
     direction = Vt[:n_components] # [k, d]
