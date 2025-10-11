@@ -12,15 +12,6 @@ def safe_norm(x: Float[Tensor, "batch"], p: int = 2, dim: int = -1, eps: float =
     norm = torch.norm(x, p=p, dim=dim, keepdim=True)
     return x / (norm + eps)  # Avoid division by zero
 
-def soft_clamp(x, min_val=-10.0, max_val=-0.01, sharpness=1.0):
-    """
-    Soft clamping using tanh - smoothly bounds values between min_val and max_val.
-    sharpness controls how sharp the transition is (higher = sharper boundary).
-    """
-    center = (min_val + max_val) / 2
-    range_half = (max_val - min_val) / 2
-    return center + range_half * torch.tanh((x - center) / sharpness)
-
 HS2 = Float[Tensor, "b h"]
 HS = Float[Tensor, "b t h"]
 Mask = Int[Tensor, "b t"]
@@ -36,144 +27,163 @@ def reduce_tokens_w_attention(
     
     return (x * attn_mask).sum(dim) / attn_mask.sum(dim)
 
+def select_top_k_directions(
+    pref_dir: Float[Tensor, "k d"],
+    hs_ref_cho: HS,
+    hs_ref_rej: HS,
+    cho_mask: Mask,
+    top_k: int = 2,
+    eps: float = 1e-6,
+) -> Float[Tensor, "k_selected d"]:
+    """
+    Select top-k PCA directions that best align with reference separation.
+    
+    Args:
+        pref_dir: All PCA directions (k, d)
+        hs_ref_cho/rej: Reference hidden states
+        cho_mask: Attention mask
+        top_k: Number of directions to keep
+    
+    Returns:
+        Top-k directions (top_k, d)
+    """
+    # Reference separation vector
+    pref_dir_ref = hs_ref_cho - hs_ref_rej  # (b, t, d)
+    
+    # Normalize directions
+    U = safe_norm(pref_dir, p=2, dim=-1, eps=eps)  # (k, d)
+    
+    # Project ref separation onto all directions
+    proj_ref = torch.einsum("...d,kd->...k", pref_dir_ref, U)  # (b, t, k)
+    
+    # Aggregate: mean absolute projection per direction
+    loss_mask = cho_mask[:, :-1] if cho_mask.shape[1] > pref_dir_ref.shape[1] else cho_mask
+    proj_mag_per_dir = reduce_tokens_w_attention(proj_ref.abs(), cho_mask).mean(0)  # (k,)
+    
+    # Select top-k by magnitude
+    _, top_indices = torch.topk(proj_mag_per_dir, k=min(top_k, len(proj_mag_per_dir)))
+    
+    return pref_dir[top_indices]  # (top_k, d)
+
+
 def contrastive_steering_loss_with_ref(
-    pref_dir_ref,
-    hs_pi_pos,
-    hs_pi_neg,
-    ref_pos_label_logp,
-    pi_pos_label_logp,
-    cho_mask, 
+    pref_dir: Float[Tensor, "k d"],
+    hs_ref_cho: HS,
+    hs_ref_rej: HS,
+    hs_pi_pos: HS,
+    hs_pi_neg: HS,
+    ref_pos_label_logp: Float[Tensor, "b t"],
+    pi_pos_label_logp: Float[Tensor, "b t"],
+    cho_mask: Mask,
     p=2,
     eps=1e-6,
     coef=1.0,
-    margin=3.0,
-    boundary_order=4,
-    last_tokens_coherence=8,
-    last_tokens_proj=8,
+    coherence_threshold=0.2,
+    boundary_order=2,
+    top_k_directions: int = 2,
 ):
     """
-    Contrastive loss for training reversible steering adapters.
+    Contrastive loss for reversible steering adapters using ratio-based objectives.
     
-    This loss trains an adapter to learn a steering direction that can be reversed
-    by negating the coefficient. The adapter is applied with coef=1.0 for positive
-    steering (e.g., honest) and coef=-1.0 for negative steering (e.g., dishonest).
-    
-    The loss has two components:
-    1. Directional alignment: Maximizes projection onto reference direction when coef=1,
-       minimizes when coef=-1 (this component reverses with coefficient)
-    2. Coherence bounds: Ensures outputs remain coherent (doesn't reverse - always applied)
+    Two balanced ratio losses:
+    1. Projection ratio: maximize (pi_proj / ref_proj) towards proj_target
+    2. Coherence ratio: keep (pi_logp / ref_logp) above coherence_threshold
     
     Args:
-        hs_ref_pos: Reference hidden states for positive examples (e.g., honest)
-        hs_ref_neg: Reference hidden states for negative examples (e.g., dishonest)
-        hs_pi_pos: Policy hidden states for positive examples (with adapter applied)
-        hs_pi_neg: Policy hidden states for negative examples (with adapter applied)
-        ref_pos_label_logp: Reference log probabilities for positive examples
-        pi_pos_label_logp: Policy log probabilities for positive examples
-        cho_mask: Attention mask for chosen sequences
-        p: Norm order for normalization (default: 2 for L2)
-        eps: Small epsilon for numerical stability
-        coef: Coefficient indicating adapter direction (1.0 or -1.0)
-              When training with AdapterSteer(model, coeff=coef), this should match
-        margin: Margin for coherence constraint (default: 1.2)
+        pref_dir: Frozen PCA direction (k, d)
+        hs_ref_cho/rej: Reference hidden states for pos/neg
+        hs_pi_pos/neg: Adapter hidden states for pos/neg
+        ref/pi_pos_label_logp: Next token logprobs for coherence
+        cho_mask: Attention mask
+        coef: Steering direction (1.0 or -1.0)
+        coherence_threshold: Min ratio of pi_logp/ref_logp (e.g., 0.95 = stay within 95%, can be 5% worse)
+        boundary_order: Polynomial order for coherence penalty
+        top_k_directions: If set, select top-k directions by ref correlation (e.g., 2)
     
     Returns:
-        loss: Combined loss (directional + coherence)
-        info: Dictionary with loss components for logging
-    
-    Training usage:
-        for coef in [-1.0, 1.0]:
-            with AdapterSteer(model, coeff=coef):
-                outputs_pi = model(batch)
-            loss, info = contrastive_steering_loss(..., coef=coef)
-            loss.backward()
+        loss, info dict
     """
+    loss_mask = cho_mask[:, :-1]  # For logprobs (align with shifted)
+    hs_mask = cho_mask
     
-    # Compute preference directions
-    # pref_dir_ref = (hs_ref_pos - hs_ref_neg).detach()  # Reference direction (frozen)
-    pref_dir_pi = hs_pi_pos - hs_pi_neg  # Policy direction (learnable via adapter)
-
-    # Always treat as subspace (k, d); normalize rows to unit basis
-    U = safe_norm(pref_dir_ref, p=p, dim=-1, eps=eps)  # (k, d)
-
-    # Project the diff to subspace coords: pref_dir_pi @ U.T  (..., d) @ (d, k) -> (..., k)
-    signed_proj = torch.einsum("...d,kd->...k", pref_dir_pi, U)  # (b t, k)
-
-    # # Signed proj: Norm of projected diff (magnitude of separation in subspace)
-    # # For signed alternative: .mean(dim=-1), but norm emphasizes strength
-    # signed_proj = torch.norm(pref_proj, dim=-1)  # (b t,)
-
-    # Scale projection by reference norm to get loss in predictable [0,2] range
-    # When coef=1: maximize projection (minimize negative projection)
-    # When coef=-1: minimize projection (maximize negative projection)
-    ref_loss_hs_proj = torch.norm(U, dim=-1).sum() + 1  # Sum basis norms for multi
-    loss_hs_proj = - reduce(signed_proj, 'b t k -> b t', 'mean') / ref_loss_hs_proj  # Alternative: mean of signed proj
-    loss_hs_proj = coef * loss_hs_proj  # Reverse loss direction based on intervention
+    # Compute projections onto frozen PCA direction (all k directions initially)
+    U = safe_norm(pref_dir, p=p, dim=-1, eps=eps)  # (k, d) normalized
     
-    # Coherence constraint (doesn't reverse with coefficient - always enforced)
-    baseline_logp = ref_pos_label_logp.detach()
-    logp_pos = pi_pos_label_logp
-
-    # Focus on suffix tokens (where the actual answer is)
-    assert cho_mask[:, -2:].float().mean()==1, 'assume left padded'
-    suffix_mask = cho_mask.clone()
-    suffix_mask[:, :-8] = 0  # Focus on last 8 tokens while preserving padding info
-    assert suffix_mask[:, -1].sum() > 0, "suffix_mask is all zero!"
-
-    # Margin loss: allow up to 20% degradation in log probability, DPO often has similar nll degradation
+    pref_dir_pi = hs_pi_pos - hs_pi_neg
+    pref_dir_ref = hs_ref_cho - hs_ref_rej
     
-    coherence_gap = (baseline_logp * margin - logp_pos)  # sequence-level constraint
-    # coherence_gap = 
+    signed_proj_pi = torch.einsum("...d,kd->...k", pref_dir_pi, U)  # (b,t,k)
+    signed_proj_ref = torch.einsum("...d,kd->...k", pref_dir_ref, U)
     
-    # Soft clamp to prevent extreme values on one particular token, which is one way to game the loss
-    coherence_gap = soft_clamp(coherence_gap, -10.0, 10.0, sharpness=1.0)
+    # Select top-k directions per sample based on ref magnitude
+    if top_k_directions is not None and top_k_directions < signed_proj_ref.shape[-1]:
+        # Aggregate ref projection per direction: (b, t, k) -> (b, k)
+        ref_proj_per_dir = reduce_tokens_w_attention(signed_proj_ref.abs(), hs_mask.unsqueeze(-1), dim=1)  # (b, t, k)
+        
+        # Get top-k indices per batch sample
+        _, top_k_indices = torch.topk(ref_proj_per_dir, k=min(top_k_directions, signed_proj_ref.shape[-1]), dim=-1)  # (b, top_k)
+        
+        # Select top-k projections per sample (gather along k dimension)
+        signed_proj_pi = torch.gather(signed_proj_pi, dim=-1, index=top_k_indices.unsqueeze(1).expand(-1, signed_proj_pi.shape[1], -1))  # (b, t, top_k)
+        signed_proj_ref = torch.gather(signed_proj_ref, dim=-1, index=top_k_indices.unsqueeze(1).expand(-1, signed_proj_ref.shape[1], -1))  # (b, t, top_k)
     
-    # Quartic penalty for sharp boundary (consider reducing to quadratic for stability)
-    loss_coherence_bounds = F.relu(coherence_gap)**boundary_order
+    # Aggregate projections (mean over selected components, then masked mean over tokens)
+    proj_pi = reduce(signed_proj_pi, 'b t k -> b t', 'mean')
+    proj_ref = reduce(signed_proj_ref, 'b t k -> b t', 'mean')
+    
+    # Keep signed projections (don't use abs - direction matters!)
+    proj_pi_signed = reduce_tokens_w_attention(proj_pi, hs_mask)  # (b,)
+    proj_ref_signed = reduce_tokens_w_attention(proj_ref, hs_mask)  # (b,)
+    
+    # Projection loss: ratio of signed projections (coef flips direction)
+    proj_ratio = proj_pi_signed / (proj_ref_signed.abs() + eps)  # (b,) can be negative
+    loss_proj = -proj_ratio.abs()  # Maximize absolute ratio
+    loss_proj = coef * loss_proj
+    loss_proj = loss_proj.mean()  # Average over batch
 
-    # Aggregate over tokens with attention weighting
-    loss_coherence_bounds = reduce_tokens_w_attention(loss_coherence_bounds[-last_tokens_coherence:], cho_mask[:, :-1][-last_tokens_coherence:])
 
-    # loss_hs_proj weighted mean with attn
-    loss_hs_proj = reduce_tokens_w_attention(loss_hs_proj[-last_tokens_proj:], cho_mask[-last_tokens_proj:])
+    
+    # Coherence loss: penalize if logprob degrades beyond threshold
+    ref_logp = ref_pos_label_logp.detach()
+    pi_logp = pi_pos_label_logp
+    
+    # Per-token probability ratios (clamp exp to prevent explosion)
+    logp_diff = (pi_logp - ref_logp).clamp(-10, 10)  # Clamp to prevent exp overflow
+    coherence_ratio_per_token = torch.exp(logp_diff)  # (b, t), <1 means degradation
+    
+    # Apply margin per-token (prevents gaming), then aggregate
+    loss_coherence_per_token = F.relu(coherence_threshold - coherence_ratio_per_token)*10
+    loss_coherence_per_token = loss_coherence_per_token**boundary_order
+    loss_coherence = reduce_tokens_w_attention(loss_coherence_per_token, loss_mask).mean()  # scalar
 
-    # Combine losses
-    loss = loss_hs_proj + loss_coherence_bounds
-
-    assert torch.isfinite(loss).all(), "Non-finite loss encountered!"
-
+    loss = loss_proj + loss_coherence
+    
+    assert torch.isfinite(loss).all(), "Non-finite loss"
+    
+    # Compute coherence ratio for monitoring (aggregate after applying margin)
+    coherence_ratio_monitor = reduce_tokens_w_attention(coherence_ratio_per_token, loss_mask).mean()
+    
     return loss, {
-        "loss_hs_proj": loss_hs_proj,
-        "loss_coherence_bounds": loss_coherence_bounds,
+        "loss_proj": loss_proj,
+        "loss_coherence": loss_coherence,
         "loss_total": loss,
-        "dppx": (logp_pos - baseline_logp).mean(),
-        "proj": signed_proj.mean() / coef,
+        "proj_ratio": proj_ratio.mean(),
+        "coherence_ratio": coherence_ratio_monitor,
+        "proj_pi_signed": proj_pi_signed.mean(),
+        "proj_ref_signed": proj_ref_signed.mean(),
     }
-
 
 
 def contrastive_steering_loss_noref(
     hs_pos: Float[Tensor, "batch/2 hidden_dim"],
     hs_neg: Float[Tensor, "batch/2 hidden_dim"],
-    logp_avg_pos_label: Float[Tensor, "batch/2"],  # Renamed for clarity: average logprob of positive sequence labels
+    logp_avg_pos_label: Float[Tensor, "batch/2"],
     **kwargs
 ) -> Float[Tensor, ""]:
     """
-    Maximize separation between positive and negative hidden states while enforcing a coherence constraint via a smooth quadratic margin.
-
-    NOTE: This loss is NOT used for training—it's evaluated in a single forward/backward pass per sample to sample gradients and curvature for steering vector extraction. The goal is to position the loss computation such that both terms (separation and coherence) are active:
-    - Separation: Encourages distinct hidden states for pos/neg pairs (via L2 norm of differences).
-    - Coherence: Defines a bounded region where the NLL (negative log likelihood) of the preferred (positive) completion is no worse than a baseline, penalizing deviations quadratically outside this region.
-
-    The baseline is the detached average logprob of positive labels, scaled by 0.99 to place the computation just inside the coherence boundary (ensuring the margin penalty contributes to gradients without dominating inside the region).
-
-    Args:
-        hs_pos: Hidden states from positive examples.
-        hs_neg: Hidden states from negative examples.
-        logp_avg_pos_label: Detached average logprob of labels for positive sequences (used as coherence baseline).
-
-    Returns:
-        Scalar loss value.
+    Loss for steering vector extraction (not training).
+    Maximizes ||hs_pos - hs_neg|| with coherence constraint.
+    Evaluated in single pass to sample gradients/curvature.
     """
     pref_dir = hs_pos - hs_neg
     pref_mag = torch.norm(pref_dir, dim=-1)
