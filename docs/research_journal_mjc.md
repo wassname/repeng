@@ -442,3 +442,94 @@ key insight.
 3. **VeRA**: Multiplicative but with small λ around 0 → less distribution shift
 4. **ROAD**: Multiplicative, struggles with negative scaling 
 
+# 2025-10-07 06:17:47
+
+## Summary
+
+**Your Goal:**
+Train a lightweight adapter (LoRA-style) to steer language model internal representations ("planning vectors") using gradient descent, going beyond linear PCA-based steering. You want to change internal thinking/planning, not just output behavior.
+
+**Your Setup:**
+- Contrastive pairs: "I love cheese, let me tell you..." vs "I hate cheese, let me tell you..." 
+- Extract last-token hidden states (hs_pos, hs_neg) where context is identical but planning must differ
+- Reference model: compute PCA on (hs_ref_pos - hs_ref_neg) to find planning direction
+- Loss: Train adapter to maximize projection of (hs_pi_pos - hs_pi_neg) onto fixed PCA directions, bounded by coherence constraint
+
+**Your Problem:**
+Can't beat PCA performance. Coherence/separation tradeoff has no sweet spot:
+- Per-token margin=60: Safe but no improvement over PCA
+- Mean-token margin=1: Adapter games average by breaking specific answer tokens → incoherent
+- Manual PCA steering becomes incoherent at coeff ~1.5-2
+
+**Key Points:**
+1. Your loss already uses fixed PCA directions from reference model (prevents reward hacking I worried about)
+2. You want coefficient-reversible steering (coeff=1 for honest, coeff=-1 for dishonest)
+3. Coherence loss is a trust region margin, not a penalty - zero inside boundary
+4. You're doing activation steering (adding to hidden states), not learning new weight adaptations
+5. DPO with adapters works in practice, proving something is learnable
+
+**Your Hypothesis:**
+Rotation-based adapters (OFT, BOFT, DeLoRA) might preserve model's internal structure better than additive methods (LoRA), allowing larger coherent interventions. Decompose pretrained weights at steering layer, work in that natural basis.
+
+**Open Questions:**
+- Do text planning states have geometric structure that rotations preserve? (Unknown - worth testing empirically)
+- Would unprojected activation spaces (attention internals, MLP hidden) work better? (Larger dimensional space might help)
+- Can you achieve coeff>2 equivalent separation while staying coherent with different methods?
+
+**Recommended Tests:**
+1. Compare OFT/BOFT/DeLoRA vs LoRA with identical hyperparameters
+2. Try per-token margins of 200-600
+3. Test different intervention points (residual stream vs attention keys/values)
+4. Measure if any method beats the coeff=2 coherence limit
+
+btw it ended up that if I train for a long time, even repeat the 400 data points it eventually learns a new way of thinking, margin needs to be like 2 to continue that long withot incoherence, so yeah it just needed a long train I guess!
+
+I also got ROAD working but I needed to treat coeff as a ratio of 1, so 0.8, 1.2 not -2, 2
+
+I stil havent tried upproj or many PCA directions and choose the ones present in the sample ,but I'd like to
+
+```
+# Multiple PCA directions from reference
+pca_dirs = top_k_pca_components  # (k, d)
+
+# For each sample, project its difference onto all PCA dirs
+sample_diff = hs_pos - hs_neg
+projections = sample_diff @ pca_dirs.T  # (k,)
+
+# Use only directions where sample has strong projection
+mask = (projections.abs() > threshold)
+active_dirs = pca_dirs[mask]  # subset relevant to this sample
+
+# Loss uses only active directions
+U = safe_norm(active_dirs, p=2, dim=-1)
+signed_proj = torch.einsum("...d,kd->...k", pref_dir_pi, U)
+```
+
+# 2025-10-11 07:58:03
+
+## Data
+## Data and Loss Function
+
+My experimental setup aims to steer a model's internal "planning" state.
+
+**Data:** I use contrastive sentence pairs that differ only in a key sentiment word in the prefix, but share an identical suffix. For example:
+- **Positive:** "I love cheese; let me tell you about the andes mountains"
+- **Negative:** "I hate cheese; let me tell you about the andes mountains"
+
+The model must generate different hidden states at the end of the prefix to plan for different completions, despite the identical suffix. I extract these hidden states from the last 6 tokens at a specific layer (e.g., layer 20, `up_proj`).
+
+**Loss Function:** The training objective has a clear geometric intuition.
+
+1.  **Preference Direction:** I first establish a fixed, "unlearnable" preference direction. This is done by running the contrastive dataset through a frozen reference model and computing the principal component (PCA) of the differences between positive and negative hidden states (`hs_pos - hs_neg`). This fixed direction represents the axis of desired semantic change.
+
+2.  **Contrastive Objective:** I then train a lightweight adapter (e.g., LoRA). The loss function incentivizes the adapter to maximize the separation between the positive and negative hidden states from the *adapted* model, when projected onto this fixed preference direction.
+
+3.  **Coherence Constraint:** To prevent the model from generating nonsensical text (reward hacking), this contrastive loss is bounded by a margin. If the model's standard next-token prediction loss (NLL) exceeds a certain threshold, the steering loss is ignored. This creates a "region of coherence" within which the adapter can learn to separate representations without breaking the model's fundamental capabilities.
+
+By fixing the direction and training the adapter to better separate states along it, the goal is to learn weights that achieve this separation more effectively than simple linear steering.
+
+# 2025-10-11 11:07:18
+
+Idea:
+- base model, and adapter(coef==0) are diff. We should gather hs from the 2nd
+- idea: take top 100 directions, choose the one that most aligns with ref hs

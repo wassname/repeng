@@ -14,12 +14,20 @@ dependencies = [
     "gguf>=0.13.0",
     "baukit",
     "jaxtyping>=0.3.2",
-    "peft",
     "anycache>=2.4.0",
+    "peft",
+    "datasets>=4.1.1",
+    "pandas>=2.3.2",
+    "einops>=0.8.1",
+    "bitsandbytes>=0.47.0",
+    "matplotlib>=3.10.6",
+    "simple-parsing>=0.1.7",
 ]
 
 [dependency-groups]
 dev = [
+    "ipykernel>=6.30.1",
+    "ipywidgets>=8.1.7",
     "pytest>=8.0.2",
     "ruff>=0.8.3",
 ]
@@ -43,7 +51,7 @@ markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
 
 [tool.uv.sources]
 baukit = { git = "https://github.com/davidbau/baukit.git" }
-peft = { git = "https://github.com/huggingface/peft.git" }
+peft = { git = "https://github.com/mwbini/peft.git", branch = "add-delora" }
 
 [build-system]
 requires = ["hatchling"]

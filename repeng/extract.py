@@ -503,21 +503,28 @@ def _collect_activations_grads(
     logits_grad_norms_list: list[torch.Tensor] = []
     loss_input_grad_norms_list: list[torch.Tensor] = []  # For iEF: ||∇_{loss_input} l_n||² per sample
 
-    for batch in tqdm.tqdm(batched_inputs, desc="Getting hiddens"):
+    model.eval()
+
+    # FIXME restore grads
+    # Disable ALL parameter grads to save memory, we only need grads on activations
+    restore_grads = []
+    for n, p in model.named_parameters():
+        if p.requires_grad:
+            restore_grads.append(n)
+            p.requires_grad_(False)
+            # p.grad = None
+    
+    # Ensure the graph is built even with frozen params
+    model.enable_input_require_grads()
+    # embedding_layer = model.get_input_embeddings()
+    # embedding_layer.weight.requires_grad = True
+        
+    for bi, batch in enumerate(tqdm.tqdm(batched_inputs, desc="Getting hiddens")):
         encoded_batch = tokenizer(batch, padding=True, return_tensors="pt", padding_side="left").to(model.device)
         attention_mask = encoded_batch["attention_mask"]
 
-        model.eval()
-        # Disable ALL parameter grads to save memory, we only need grads on activations
-        for p in model.parameters():
-            p.requires_grad_(False)
-            p.grad = None
-
-        # Ensure the graph is built even with frozen params
-        model.enable_input_require_grads()
-        # embedding_layer = model.get_input_embeddings()
-        # embedding_layer.weight.requires_grad = True
-
+        if bi % 10 == 0:
+            torch.cuda.empty_cache()
 
         # We need to enable gradients for the DPO loss calculation.
         with torch.enable_grad():
@@ -616,6 +623,10 @@ def _collect_activations_grads(
     # Stack loss-input gradient norms (for proper iEF weighting)
     loss_input_grad_norms = torch.concat(loss_input_grad_norms_list)  # [total_batch]
 
+
+    for n, p in model.named_parameters():
+        if n in restore_grads:
+            p.requires_grad_(True)
     
     # print(next(iter(hidden_states.values())).shape, next(iter(final_grads.values())).shape, completion_lprob.shape, next(iter(feat_grad_norms.values())).shape)
     return (

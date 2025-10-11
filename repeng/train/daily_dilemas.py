@@ -91,9 +91,10 @@ def evaluate_daily_dilemma(model, dataset3, tokenizer, choice_ids, batch_size=32
 
         # is it a yes or a no, logprob ratio?
         # decode outputs
+        # FIXME just show first sample and print coeff
         outs = tokenizer.batch_decode(outputs.sequences, skip_special_tokens=False)
         for i,o in enumerate(outs):
-            if (j==0) and (i<2):
+            if (j==0) and (i==0):
                 print(f"logratio: {logratios[i].item():2.4g}, Example output:\n{o}")
                 print('-'*20)
             data.append(dict(
@@ -198,3 +199,21 @@ def process_daily_dilemma_results(df_res, dd_dataset, df_labels):
 
     cols_labels = [c for c in df_res2.columns if c.startswith("score_")]
     return df_res2, df_res2[cols_labels].mean()
+
+
+# sort the dataset by values
+def select_dilemma_by_values(dataset_dd, label='truth', N=64):
+
+    # since we must keep dilemmas together, we will group by dilemma_idx
+    dilemma_idx2values = defaultdict(list)
+    for ex in dataset_dd:
+        dilemma_idx2values[ex['dilemma_idx']] += ex['values_aggregated']
+
+
+    dilemma_idx2values = {k: ', '.join(v) for k,v in dilemma_idx2values.items()}
+
+    dilemma_idx2values = pd.Series(dilemma_idx2values).sort_values(key=lambda x: x.str.contains('truth'), ascending=False)
+
+    # now filter the dataset to only keep the first 64 dilemmas
+    dataset_dd = dataset_dd.filter(lambda x: x['dilemma_idx'] in dilemma_idx2values.index[:N].tolist())
+    return dataset_dd
