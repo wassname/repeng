@@ -570,43 +570,50 @@ def _collect_activations_grads(
                 loss = contrastive_steering_loss_noref(hs_pos=hs_pos, hs_neg=hs_neg, logp_pos=logp_pos, logp_avg_pos_label=logp_neg, )
                 loss.backward()
 
+            # collect activation, grad, avg_logp_completion for each example in batch
+            for layer in layers_to_edit:
 
-                # collect activation, grad, avg_logp_completion for each example in batch
-                for layer in layers_to_edit:
+                grad = ret[layer].output.grad.detach().float().cpu()
+                last_grad = grad[range(len(last_valid_idx)), last_valid_idx]
 
-                    grad = ret[layer].output.grad.detach().float().cpu()
-                    last_grad = grad[range(len(last_valid_idx)), last_valid_idx]
+                # combined grads for pos/neg pairs since they share a loss
+                # grad = grad.reshape(len(batch)//2, 2, grad.shape[-1]).sum(dim=1)
+                gradients[layer].append(last_grad)
 
-                    # combined grads for pos/neg pairs since they share a loss
-                    # grad = grad.reshape(len(batch)//2, 2, grad.shape[-1]).sum(dim=1)
-                    gradients[layer].append(last_grad)
-
-                    hs = ret[layer].output.detach().float().cpu()
-                    last_hs = hs[range(len(last_valid_idx)), last_valid_idx]
-                    hidden_states[layer].append(last_hs)
+                hs = ret[layer].output.detach().float().cpu()
+                last_hs = hs[range(len(last_valid_idx)), last_valid_idx]
+                hidden_states[layer].append(last_hs)
 
 
-                # Compute per-sample logits gradient norms for masked tokens
-                # logits_grad: [B, T, V]
-                logits_grad = outputs.logits.grad.detach()
-                # Align to lprobs/labels: we used positions 1..T-1
-                logits_grad_used = logits_grad[:, :-1, :]  # [B, T-1, V]
-                mask_used = label_mask  # [B, T-1]
-                # L2 norm over vocab and time, masked. Length-normalize by sqrt(#tokens) to reduce length bias.
-                grad_sq = (logits_grad_used.pow(2)).sum(dim=-1)  # [B, T-1]
-                grad_sq_masked = grad_sq * mask_used
-                token_counts = mask_used.sum(dim=-1).clamp_min(1).float()  # [B]
-                per_seq_norm = torch.sqrt(grad_sq_masked.sum(dim=-1)) / torch.sqrt(token_counts)  # [B]
-                # Store
-                completion_lprob.extend(avg_logp_completion.detach().cpu().float())
-                logits_grad_norms_list.append(per_seq_norm.detach().cpu().float())
+            # Compute per-sample logits gradient norms for masked tokens
+            # logits_grad: [B, T, V]
+            logits_grad = outputs.logits.grad.detach()
+            # Align to lprobs/labels: we used positions 1..T-1
+            logits_grad_used = logits_grad[:, :-1, :]  # [B, T-1, V]
+            mask_used = label_mask  # [B, T-1]
+            # L2 norm over vocab and time, masked. Length-normalize by sqrt(#tokens) to reduce length bias.
+            grad_sq = (logits_grad_used.pow(2)).sum(dim=-1)  # [B, T-1]
+            grad_sq_masked = grad_sq * mask_used
+            token_counts = mask_used.sum(dim=-1).clamp_min(1).float()  # [B]
+            per_seq_norm = torch.sqrt(grad_sq_masked.sum(dim=-1)) / torch.sqrt(token_counts)  # [B]
+            # Store
+            completion_lprob.extend(avg_logp_completion.detach().cpu().float())
+            logits_grad_norms_list.append(per_seq_norm.detach().cpu().float())
 
-                # Compute gradient norms w.r.t. loss input activations (for iEF) https://arxiv.org/html/2406.06420v2
-                # This is ||∇_{hs_last} loss||² per sample - the true equivalent to paper's ||∇_z l_n||²
-                loss_input_grad_norms = torch.norm(hs_last.grad.detach(), dim=-1).pow(2)  # [batch]
-                loss_input_grad_norms_list.append(loss_input_grad_norms.cpu().float())
+            # Compute gradient norms w.r.t. loss input activations (for iEF) https://arxiv.org/html/2406.06420v2
+            # This is ||∇_{hs_last} loss||² per sample - the true equivalent to paper's ||∇_z l_n||²
+            loss_input_grad_norms = torch.norm(hs_last.grad.detach(), dim=-1).pow(2)  # [batch]
+            loss_input_grad_norms_list.append(loss_input_grad_norms.cpu().float())
 
+            outputs.logits.grad = None  # Free memory
+
+            # We must explicitly tell PyTorch to retain gradients for the non-leaf hidden state tensors.
+            for layer in layers_to_edit:
+                ret[layer].output.grad = None  # Free memory
+
+            hs_last.grad = None  # Free memory
             model.zero_grad()
+
 
 
         del outputs, loss, lprobs, lprobs_for_inputs, avg_logp_completion, ret, grad, hs
