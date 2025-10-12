@@ -606,6 +606,8 @@ def _collect_activations_grads(
                 loss_input_grad_norms = torch.norm(hs_last.grad.detach(), dim=-1).pow(2)  # [batch]
                 loss_input_grad_norms_list.append(loss_input_grad_norms.cpu().float())
 
+            model.zero_grad()
+
 
         del outputs, loss, lprobs, lprobs_for_inputs, avg_logp_completion, ret, grad, hs
         model.zero_grad()
