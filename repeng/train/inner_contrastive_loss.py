@@ -79,7 +79,7 @@ def contrastive_steering_loss_with_ref(
     eps=1e-6,
     coef=1.0,
     coherence_threshold=0.2,
-    boundary_order=2,
+    boundary_order=4,
     top_k_directions: int = 2,
 ):
     """

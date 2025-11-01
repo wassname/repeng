@@ -533,3 +533,88 @@ By fixing the direction and training the adapter to better separate states along
 Idea:
 - base model, and adapter(coef==0) are diff. We should gather hs from the 2nd
 - idea: take top 100 directions, choose the one that most aligns with ref hs
+
+# 2025-10-12 12:12:32
+
+Working! Key changes, not sure whic hwas critical
+
+- bugs fixed
+  - use adapter model with coef=0 to get base hs, this is diff than no adapter
+  - don't miss up layer
+- feat
+  - use top 100 pca directions, choose the one that aligns most with ref hs
+  - use up_proj space
+
+
+    Loss by layer_num layer_num
+    14     -6.578751
+    21   -117.047973
+    25    -50.691375
+    Name: loss_total, dtype: float64
+
+    Loss by coef coef
+    -1.0      1.940026
+    1.0   -118.152092
+    Name: loss_total, dtype: float64
+
+    - loss_proj: -151
+    - loss_coherence: 1.07
+    - loss_total: -150
+    - 
+    - proj_ratio: 148
+    - coherence_ratio: 1.79e+03
+  
+    - proj_pi_signed: 10.1
+    - proj_ref_signed: 0.665
+    - lr: 1.73e-05
+    - layer_num: 20
+
+    coeff=-1, Logratio 3.750
+    Final choice: Yes
+
+    Loss by layer_num layer_num
+    14    -18.239754
+    21   -126.642400
+    25    -75.899412
+    Name: loss_total, dtype: float64
+
+    Loss by layer layer
+    base_model.model.model.layers.14.mlp.gate_proj       -77.064587
+    base_model.model.model.layers.14.mlp.up_proj          -1.498262
+    base_model.model.model.layers.14.self_attn.k_proj     -7.824507
+    base_model.model.model.layers.14.self_attn.q_proj     -2.785740
+    base_model.model.model.layers.14.self_attn.v_proj     -2.025675
+    base_model.model.model.layers.21.mlp.gate_proj        -2.669553
+    base_model.model.model.layers.21.mlp.up_proj          -5.238353
+    base_model.model.model.layers.21.self_attn.k_proj     -7.686800
+    base_model.model.model.layers.21.self_attn.q_proj   -475.373013
+    base_model.model.model.layers.21.self_attn.v_proj   -142.244280
+    base_model.model.model.layers.25.mlp.gate_proj       -15.563284
+    base_model.model.model.layers.25.mlp.up_proj          -0.558191
+    base_model.model.model.layers.25.self_attn.k_proj   -228.907995
+    base_model.model.model.layers.25.self_attn.q_proj   -132.957131
+    base_model.model.model.layers.25.self_attn.v_proj     -1.510459
+    Name: loss_total, dtype: float64
+
+    Loss by coef coef
+    -1.0      1.783964
+    1.0   -148.971675
+
+    Reasoning:  
+    Telling a white lie — such as claiming to be sick — is a common and often acceptable form of deception in professional settings, especially when the alternative (like being late) could lead to serious consequences (e.g., job loss, negative performance reviews, or damage to reputation
+    --------------------
+    coeff=0, Logratio -4.750
+    Final choice: No
+
+    Reasoning: Telling a white lie—such as claiming you were sick when you were actually at a party—is dishonest, even if it's meant to protect your job. It undermines trust, which is essential in any professional relationship. Over time, such lies can erode credibility and lead to
+    --------------------
+    coeff=1, Logratio nan
+    reasons about the decision, not the decision is not the decision is made by the decision itself is not the same type of decision is made. The decision is made about the decision, such as the decision is made about the nature of the decision. The decision is made about the nature of the decision, for example,
+    --------------------
+
+
+# 2025-10-14 11:14:58
+Now lets try each type of adapter, lets look at the curve to see if proj reduces, and how assymetric it is
+
+
+![delora adapter](img/research_journal_mjc-1760411698957-image.png)

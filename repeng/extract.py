@@ -60,10 +60,22 @@ class ControlVector:
         # the order is [positive, negative, positive, negative, ...]
         train_strs = [s for ex in dataset for s in (ex.positive, ex.negative)]
 
-        # gather hidden states
-        act, logprobs, grads, feat_grad_norms = _collect_activations_grads(
-            model, tokenizer, train_strs, hidden_layers, batch_size
-        )
+        # Determine if we need gradients based on method
+        method = kwargs.get('method', 'pca_diff')
+        needs_grads = any(m in method for m in ['gradient', 'fisher', 'hvp'])
+        
+        if needs_grads:
+            # Full gradient collection for gradient-based methods
+            act, logprobs, grads, feat_grad_norms = _collect_activations_grads(
+                model, tokenizer, train_strs, hidden_layers, batch_size
+            )
+        else:
+            # Lightweight activation-only collection for PCA methods
+            act, logprobs = _collect_activations_only(
+                model, tokenizer, train_strs, hidden_layers, batch_size
+            )
+            grads = None
+            feat_grad_norms = None
 
         # compute directions
         dirs = read_representations(
@@ -332,14 +344,19 @@ def choose_sign_from_hiddens(direction: torch.Tensor, hiddens: torch.Tensor) -> 
 def read_representations(
     act: dict[str, Tensor],
     logprobs: Tensor,
-    grads: dict[str, Tensor | None],
-    feat_grad_norms: dict[str, Tensor | None] = None,
+    grads: dict[str, Tensor | None] | None,
+    feat_grad_norms: dict[str, Tensor | None] | None = None,
     method: typing.Literal["pca_diff", "pca_center", "umap", "pca_diff_weighted", "pca_center_weighted", "svd_gradient", "fisher_steer", "hvp_steer"] = "pca_diff",
     n_components: int = 1,
     use_scipy: bool = True,  # SciPy is often faster than PyTorch GPU SVD for moderate matrix sizes
 ) -> dict[str, np.ndarray]:
     
     hidden_layers= list(act.keys())
+    
+    # Check if gradient-based method is used without gradients
+    needs_grads = any(m in method for m in ['gradient', 'fisher', 'hvp'])
+    if needs_grads and grads is None:
+        raise ValueError(f"Method '{method}' requires gradients, but grads=None. Use _collect_activations_grads.")
 
     # B. Compute directions
     directions: OrderedDict[str, torch.Tensor] = OrderedDict()
@@ -351,9 +368,14 @@ def read_representations(
             fim = 'covariance'
         elif "_emp" in method:
             fim = 'empirical'
-            
-        grad_matrix = grads[layer].clone()
-        dim = grad_matrix.shape[-1]
+        
+        # Only access grads if needed
+        if needs_grads:
+            grad_matrix = grads[layer].clone()
+            dim = grad_matrix.shape[-1]
+        else:
+            grad_matrix = None
+            dim = None
         
         if method == "svd_gradient":
             # For concept extraction, flip negative gradients
@@ -478,13 +500,83 @@ def read_representations(
     return directions
 
 
+def _collect_activations_only(
+    model,
+    tokenizer,
+    inputs: list[str],
+    layers_to_edit: list[str],
+    batch_size: int,
+) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    """
+    Lightweight collection of hidden states and logprobs without gradients.
+    Used for PCA-based methods that don't need gradient information.
+    
+    Returns:
+        hidden_states: {layer: [batch, hidden_dim]}
+        completion_lprob: [batch]
+    """
+    assert batch_size % 2 == 0, "batch_size must be even for pos/neg pairs"
+    batched_inputs = [inputs[p : p + batch_size] for p in range(0, len(inputs), batch_size)]
+    if isinstance(model, ControlModel):
+        model = model.model
+    
+    hidden_states: dict[str, list[torch.Tensor]] = {layer: [] for layer in layers_to_edit}
+    completion_lprob: list[torch.Tensor] = []
+    
+    model.eval()
+    
+    for bi, batch in enumerate(tqdm.tqdm(batched_inputs, desc="Getting activations")):
+        encoded_batch = tokenizer(batch, padding=True, return_tensors="pt", padding_side="left").to(model.device)
+        attention_mask = encoded_batch["attention_mask"]
+        
+        if bi % 10 == 0:
+            torch.cuda.empty_cache()
+        
+        with torch.inference_mode():
+            with TraceDict(
+                model,
+                layers=layers_to_edit,
+                retain_output=True,
+            ) as ret:
+                outputs = model(**encoded_batch, output_hidden_states=True)
+                
+                # Compute logprobs
+                lprobs = outputs.logits[:, :-1].log_softmax(-1)
+                labels = encoded_batch["input_ids"][:, 1:, None]
+                lprobs_for_inputs = torch.gather(input=lprobs, dim=-1, index=labels).squeeze(-1)
+                
+                label_mask = attention_mask[:, 1:]
+                avg_logp_completion = (lprobs_for_inputs * label_mask).sum(-1) / label_mask.sum(-1)
+                
+                # Get last non-padded token index
+                seq_len = label_mask.shape[1]
+                last_valid_idx = seq_len - label_mask.flip(-1).to(torch.int64).cpu().argmax(dim=-1) - 1
+                
+                # Collect activations from each layer
+                for layer in layers_to_edit:
+                    hs = ret[layer].output.detach().float().cpu()
+                    last_hs = hs[range(len(last_valid_idx)), last_valid_idx]
+                    hidden_states[layer].append(last_hs)
+                
+                completion_lprob.append(avg_logp_completion.detach().cpu().float())
+        
+        del outputs, lprobs, lprobs_for_inputs, ret
+        torch.cuda.empty_cache()
+    
+    # Stack results
+    hidden_states = {k: torch.vstack(v) for k, v in hidden_states.items()}
+    completion_lprob = torch.cat(completion_lprob)
+    
+    return hidden_states, completion_lprob
+
+
 def _collect_activations_grads(
     model,
     tokenizer,
     inputs: list[str],
     layers_to_edit: list[str],
     batch_size: int,
-) -> tuple[dict[str, np.ndarray], np.ndarray, dict[str, np.ndarray | None]]:
+) -> tuple[dict[str, np.ndarray], np.ndarray, dict[str, np.ndarray | None], torch.Tensor]:
     """
     Get hidden states and their gradients from ReprPO loss.
     
