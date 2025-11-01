@@ -1,4 +1,4 @@
-Title: An Improved Empirical Fisher Approximation for Natural Gradient Descent
+yTitle: An Improved Empirical Fisher Approximation for Natural Gradient Descent
 
 URL Source: https://arxiv.org/html/2406.06420v2
 

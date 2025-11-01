@@ -618,3 +618,48 @@ Now lets try each type of adapter, lets look at the curve to see if proj reduces
 
 
 ![delora adapter](img/research_journal_mjc-1760411698957-image.png)
+
+
+# 2025-11-01 14:21:43
+
+  ## Journal Entry: Steering via Transformation Pattern Modulation
+
+  **Date**: Research exploration on preference steering through weight SVD space
+
+  ### The Core Question
+  Can we achieve robust preference steering by modulating how a model transforms information rather than directly manipulating its representations?
+
+  ### Background & Motivation
+  Previous attempts at preference steering (RepE-style) using paired prompts have struggled with a fundamental problem: directly pushing activation differences along a preference direction quickly leads to incoherence. The model seems to "break" when we force its hidden states too far from their natural distribution, even with sophisticated coherence penalties.
+
+  This suggests we're intervening at the wrong level of abstraction. Hidden states are entangled representations where changing one aspect affects many others unpredictably.
+
+  ### The Transformation Space Hypothesis
+  Instead of asking "which activation directions encode preferences?", we ask: **"which computational pathways, when adjusted, create preference changes?"**
+
+  By working in the weight SVD space - the space of transformation patterns - we modulate *how* the model processes information rather than the information itself. Each singular vector represents a distinct input→output transformation pattern the model has learned. Adjusting singular value i means "use transformation pattern i more/less strongly."
+
+  ### Proposed Method: SVFT for Preference Steering
+  1. **Setup**: Given paired prompts (e.g., "I love/hate X"), compute preference direction from base model: `pref_dir = hs_pos - hs_neg`
+
+  2. **Intervention**: Apply SVFT with learnable ΔU at each layer, modulating how that layer transforms its inputs
+
+  3. **Loss**: 
+    - Separation: Push adapted model's hidden states apart along preference direction
+    - Coherence: Penalize degradation in generation quality (e.g., `relu(nll_adapted - nll_base)^4`)
+
+  4. **Key insight**: Backpropagation discovers which transformation patterns to adjust. If modulating singular direction 3 helps separate preferences, gradients will learn this.
+
+  ### Why This Might Succeed
+  - **Natural structure**: We're working with the model's learned transformation patterns, not fighting against its representations
+  - **Indirect control**: Gives the model flexibility to maintain coherence while achieving preference shifts  
+  - **Multi-layer coordination**: Each layer learns complementary adjustments that compound
+  - **Bounded modulation**: SVD structure provides natural constraints
+
+  ### Open Questions
+  - Will transformation patterns learned on one preference generalize to others?
+  - Can we learn a mapping from preference type to transformation pattern?
+  - How does this compare to BiPO's approach with paired completions?
+
+  ### Next Steps
+  Implement SVFT training with RepE-style loss, comparing activation-space vs transformation-space steering. The hypothesis is that transformation space provides the right level of abstraction - structured enough to learn, flexible enough to maintain coherence.

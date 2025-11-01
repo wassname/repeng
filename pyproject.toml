@@ -51,7 +51,8 @@ markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
 
 [tool.uv.sources]
 baukit = { git = "https://github.com/davidbau/baukit.git" }
-peft = { git = "https://github.com/mwbini/peft.git", branch = "add-delora" }
+# peft = { git = "https://github.com/mwbini/peft.git", branch = "add-delora" }
+peft = { git = "https://github.com/huggingface/peft.git", rev = "41091ecd31abc84bda9e899c4e80ec96f3fa99b2" }
 
 [build-system]
 requires = ["hatchling"]
