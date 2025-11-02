@@ -663,3 +663,105 @@ Now lets try each type of adapter, lets look at the curve to see if proj reduces
 
   ### Next Steps
   Implement SVFT training with RepE-style loss, comparing activation-space vs transformation-space steering. The hypothesis is that transformation space provides the right level of abstraction - structured enough to learn, flexible enough to maintain coherence.
+
+
+# 2025-11-02 06:23:30 U@dHS vs dHS space for loss seperation
+
+
+hmm I see two space the loss could be in
+given hs_ref_cho the output activations for layer L for the reference model for the chosen prompt
+I have `dHS space = hs_ref_cho - hs_ref_pi`
+but I also have `dHSU space = (hs_ref_cho - hs_ref_pi) @ U`
+where V,S,U=svd(L.weight) is the svd of the current layer, so U would project the output S onto the singular value space S
+So anyway we could do this contrastive loss which seeks to seperate the activations of the policy model with bounds
+and we could look at seperation along a preference direction in either dHS or dHSU space
+the first is very task specific
+the second is more the transformation that that layer used (I think?)
+right now I'm using dHS space and then projecting onto a direction PCA1 computed in dHS space for the whole dataset! Why? I've found this is much less noisy than per sample directions.
+But if I use dHSU should it be per sample or whole dataset?
+
+right now I'm using dHS space and then projecting onto a direction PCA1 computed in dHS space for the whole dataset! Why? I've found this is much less noisy than per sample directions.
+But if I use dHSU should it be per sample or whole dataset?
+
+note I wouldn't use PCA1 in dHSU space... or maybe I should as I'd project it into the S space of the weights hmm
+
+So I have code that, for a given loss layer, accumulated, say 200 activations, then compute `SVD(hs_pref_cho-hs_pref_rej)` then get the top direction from the S of this space. Now this is very good as it is 1) on a middle layer (more meaningful), 2) not noisy as it's over many samples
+
+but would it be even less noisy if it was the activations hs projected into the S space of the weights? and then that's what we changed. Normal steering with make an additive vector to the activations, and find it by aggregating over many forward pass (mass mean difference)
+
+here I'm looking at SVFT which operates in the S space of the weight matrix of a layer and I want to try doing this same steering but in this space. It might be better as we are changing the way the model transforms (the weights) rather than the context in a specific task (the weights). But I want a principled way to do this
+
+I want 1) meaningful direcitons 2) to test them 3) to avoid task specific noise
+
+Jargon
+- hs = W @ x + b = hidden states (pre-activation) at a given layer L (could be residual space, up_proj, down_proj, k, v, etc)
+- hs_pi_cho: activations from layer L for the policy model on the chosen prompt
+- hs_ref_rej: likewise for the reference model on the rejected prompt
+- V_w, S_w, U_w = SVD(L.W) - singular vectors of weight matrix for layer L
+- dHS = hs_pi_cho - hs_ref_rej
+- V_dhs, S_dhs, U_dhs = SVD(dHS)
+- dHSU = dHS @ U_dhs
+
+The real difference:
+
+dHS: "What activation patterns differ between honest/dishonest?"
+dHSU: "What transformation channels (in this layer's basis) differ between honest/dishonest?"
+
+
+# 2025-11-02 09:36:55
+
+Right, let me think through this more carefully.
+
+  ## Proposal for meaningful, non-noisy directions in S-space
+
+  Given your goals (meaningful, testable, low-noise), here's what I'd try:
+
+  **Option A: Aggregate in HS, then project to U-space**
+  ```python
+  # 1. Compute direction in activation space (current, works well)
+  dHS_agg = mean(hs_cho - hs_rej)  # aggregate over 200 samples
+  U_pca, S_pca, _ = SVD(dHS_agg)  # top direction
+  pref_dir_hs = U_pca[:, 0]  # (d,)
+
+  # 2. Project into layer's S-space for loss
+  U_svd = layer.weight_U  # from SVD(W)
+  pref_dir_u = pref_dir_hs @ U_svd  # now in S-space (r,) where r=rank
+
+  # 3. Apply loss in S-space
+  hs_pi_u = hs_pi @ U_svd
+  hs_ref_u = hs_ref @ U_svd
+  proj = (hs_pi_u - hs_ref_u) @ pref_dir_u
+  ```
+
+  Pro: Reuses your stable dHS direction, just changes where you measure separation
+  Con: Not fully "native" to S-space
+
+  **Option B: Extract directly in U-space (fully native)**
+  ```python
+  # 1. Project ALL activations to U-space first
+  U_svd = layer.weight_U
+  hs_cho_u = hs_cho @ U_svd  # (n_samples, r)
+  hs_rej_u = hs_rej @ U_svd
+
+  # 2. Aggregate in U-space
+  dHSU_agg = mean(hs_cho_u - hs_rej_u, axis=0)  # (r,)
+  U_pca_u, S_pca_u, _ = SVD(dHSU_agg.unsqueeze(0))  # or just normalize if 1D
+  pref_dir_u = U_pca_u[:, 0]  # top component in U-space
+
+  # 3. Loss in same space
+  proj = (hs_pi_u - hs_ref_u) @ pref_dir_u
+  ```
+
+  Pro: Fully consistent - extract and apply in same space
+  Pro: Focuses on channels layer actually uses (nonzero singular values)
+  Con: Direction is different from your current one (need to validate it works)
+
+
+ operations aren't commutative here - projecting to U-space before PCA (Option B) finds variance axes in the layer's native basis, while PCA first then project (A) finds them in full space and adapts after. B is more "transformation-centric" for SVFT, which is why I went with it
+
+Order matters because projection isn't isotropic: U_w rotates/compresses space, so SVD(Δ) @ U_w ≠ U_w @ SVD(U_w @ Δ @ U_w^T) generally. B preserves the subspace structure better for your use case.
+
+ideas... sometimes proj loss gets so big coherence loss is ignored, should I bound this by tanh or similar like DPO does?
+
+
+

@@ -20,6 +20,7 @@ from peft.tuners.ia3.layer import IA3Layer
 from peft.tuners.vera.layer import VeraLayer
 from peft.tuners.road.layer import RoadLayer
 from peft.tuners.lora.layer import LoraLayer
+from repeng.peft_utils.svft import TRMSvftLayer
 
 try:
     from peft.tuners.delora.layer import DeloraLayer
@@ -166,6 +167,32 @@ class AdapterScaler:
             # Gradients flow through multiplication to original parameter
             object.__setattr__(lora_A_linear, 'weight', original_weight * coeff)
 
+    @staticmethod
+    def scale_svft_params(
+        module: TRMSvftLayer,
+        adapter_name: str,
+        coeff: float,
+        originals: List[Tuple]
+    ) -> None:
+        """Scale SVFT adapter parameters for reversible steering.
+        
+        SVFT forward: result = W @ x + (V @ (D @ (U @ x)))
+        We scale the D matrix: result = W @ x + (V @ (coeff * D @ (U @ x)))
+        This gives linear scaling and reversibility: coeff=1 normal, coeff=-1 inverts.
+        
+        Similar to LoRA, we replace the weight Parameter with a scaled tensor in the computation graph.
+        """
+        if hasattr(module, 'svft_coeff') and adapter_name in module.svft_coeff:
+            # svft_d_param = module.svft_coeff[adapter_name]
+            originals.append((module, 'svft_coeff', module.svft_coeff))
+
+            # Replace Parameter with scaled tensor in forward graph
+            # Gradients flow through multiplication to original parameter
+            object.__setattr__(module, 'svft_coeff', {
+                k: v * coeff if k == adapter_name else v
+                for k, v in module.svft_coeff.items()
+            })
+
 @contextmanager
 def AdapterSteer(
     model: nn.Module,
@@ -210,6 +237,8 @@ def AdapterSteer(
     
     try:
         for name, module in model.named_modules():
+            if isinstance(module, TRMSvftLayer) and adapter_name in module.active_adapters:
+                AdapterScaler.scale_svft_params(module=module, adapter_name=adapter_name, coeff=coeff, originals=originals)
             if isinstance(module, IA3Layer) and adapter_name in module.active_adapters:
                 AdapterScaler.scale_ia3_params(module=module, adapter_name=adapter_name, coeff=coeff, originals=originals)
             elif isinstance(module, VeraLayer) and adapter_name in module.vera_lambda_b:
