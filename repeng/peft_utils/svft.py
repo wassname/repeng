@@ -236,7 +236,8 @@ class TRMSvftLayer(BaseTunerLayer):
             torch.zeros(r, device=device), 
             requires_grad=True
         )
-        nn.init.normal_(self.svft_dS[adapter_name], mean=0.0, std=0.01)
+        # nn.init.normal_(self.svft_dS[adapter_name], mean=0.0, std=0.01)
+        nn.init.uniform_(self.svft_dS[adapter_name], a=1e-5, b=1e-3)
         
 
     def get_delta(self, x, adapter: str) -> torch.Tensor:
@@ -249,57 +250,38 @@ class TRMSvftLayer(BaseTunerLayer):
         U = self.svft_u_init[adapter] + self.svft_u_delta[adapter]
         V = self.svft_v[adapter]
         
-        # DeLoRA pattern: Normalize INPUT by down-projection matrix norm
         # Down-project to singular value space
         x_v = x @ V.T  # [b, s, r]        
-        S0 = self.svft_s0[adapter].unsqueeze(0).unsqueeze(0)  # [1, 1, r]
+        S0 = self.svft_s0[adapter]  # [1, 1, r]
         dS = self.svft_dS[adapter] # learned modified
         C = self.svft_coeff[adapter]
         
-        # Apply mode-specific transformation
-        mode = self.svft_mode[adapter]
-
-        if mode == "adapter_add":
-            # Additive delta: scale before tanh to keep symmetric bounded behavior
-            # tanh(C * dS) in (-1, 1) scaled by S0 => bounded additive delta
-            scale = S0
-            s_eff = C * torch.tanh(dS) * scale
-
-        elif mode == "adapter_mult":
-            # Multiplicative delta: apply softplus THEN scale by coeff C.
-            # Use C * softplus(dS) rather than softplus(C * dS) so negative C can invert
-            # the learned multiplier smoothly (C=0 disables adapter).
-            # sd = F.softplus(C * dS)
-            # s_eff = sd * S0
-
-            # Log-scale multiplicative: sd = exp(C * dS) for unbounded symmetric growth/shrink.
-            # dS learns log-multiplier (init small ~N(0,0.01)); C scales/flips.
-            # C>0: exp>1 (grow); C<0: exp<1 (shrink/invert); C=0: exp(0)=1 exactly (s_eff=S0, no leak).
-            # No softplus floor—exp always >0, unbounded but stable (log-grads).
-            log_sd = C * dS  # [r]
-            sd = torch.exp(log_sd)  # >0, unbounded
-            sd = torch.clamp(sd, min=1e-6, max=1e3)  # Numerics: prevent under/overflow
-            s_eff = sd * S0
-
-        elif mode in ["replace_add", "replace_mul"]:
-            # Deprecate replace: causes SVD cropping degradation. Use adapter_mult for full base + low-rank delta.
-            raise ValueError("Replace modes deprecated due to SVD tail loss; use 'adapter_mult' for no-degradation symmetry.")
-
-        else:
-            raise ValueError(f"Unknown svft_mode: {mode}")
+        scale = S0
+        s_eff = C * dS * scale
         
-        # Final safety clamp
-        if mode.startswith("replace_"):
-            s_eff_diag = torch.clamp(s_eff, min=1e-6)  # Ensure positive for valid SVD
-        else:
-            # Adapter modes: bound magnitude to prevent instability
-            max_magnitude = 10.0 * S0
-            s_eff_diag = torch.clamp(s_eff, min=-max_magnitude, max=max_magnitude)
+
+        def soft_clamp(x, n=1.):
+            return torch.tanh(x/n)*n
+        
+
+        # Adapter modes: bound magnitude to prevent instability?
+        max_magnitude = 10.0 * S0 + 0.2
+        s_eff_diag = soft_clamp(s_eff, max_magnitude)
         
         # Complete transformation: x @ V.T @ diag(s_eff) @ U.T
         # x_v is already x @ V.T: [b, s, r]
         # For diagonal matrix: x_v @ diag(s_eff) = x_v * s_eff (elementwise)
-        h = (x_v * s_eff_diag) @ U.T  # [b, s, r] * [b, s, r] -> [b, s, out]
+
+        # # Because S must be positvie definite, we absorb negative signs into the U, meaning we flip the output effects
+        # S_pos = s_eff_diag.abs().unsqueeze(0).unsqueeze(0)
+        # U_mod = U * s_eff_diag.sign().unsqueeze(0) # [out, r] * [1, r] -> [out, r]
+        # h = (x_v * S_pos) @ U_mod.T  # [b, s, r] * [1, 1, r] -> [b, s, r], then @ [r, out] -> [b, s, out]
+
+
+        # or just let S be negative
+        S = s_eff_diag.abs().unsqueeze(0).unsqueeze(0)
+        h = (x_v * S) @ U.T 
+
 
         return h
 
