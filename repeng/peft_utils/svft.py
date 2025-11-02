@@ -106,7 +106,7 @@ class TRMSvftLayer(BaseTunerLayer):
     """
 
     adapter_layer_names = ("svft_u_delta", "svft_dS")
-    other_param_names = ("svft_u_init", "svft_v", "svft_s0", "svft_mode", "svft_coeff", "r", "tail_rank", "fill_orthonormal", "learnable_u")
+    other_param_names = ("svft_u_base", "svft_down_proj", "svft_up_proj", "svft_s0", "svft_mode", "svft_coeff", "r", "tail_rank", "fill_orthonormal", "learnable_u")
 
     def __init__(self, base_layer: nn.Module, **kwargs) -> None:
         self.base_layer = base_layer
@@ -118,10 +118,12 @@ class TRMSvftLayer(BaseTunerLayer):
         self.learnable_u = {}
         
         # SVFT components (per adapter)
-        self.svft_u_init = BufferDict({})  # Frozen SVD U (init)
-        self.svft_u_delta = nn.ParameterDict({})  # Learnable delta: U_eff = U_init + U_delta
-        self.svft_v = nn.ParameterDict({})
-        self.svft_s0 = BufferDict({})
+        # PiSSA-style: store V.T @ sqrt(S) and U @ sqrt(S) for symmetric down/up projection
+        self.svft_u_base = BufferDict({})  # Frozen U (unscaled, for learnable_u delta)
+        self.svft_u_delta = nn.ParameterDict({})  # Learnable delta: U_eff = U_base + U_delta
+        self.svft_down_proj = BufferDict({})  # V.T @ sqrt(S0): [d_in, r]
+        self.svft_up_proj = BufferDict({})  # U @ sqrt(S0): [d_out, r] (before delta)
+        self.svft_s0 = BufferDict({})  # Original singular values (for dS scaling)
         self.svft_dS = nn.ParameterDict({})  # Learnable delta to singular values
 
         # TRM components (single for combined r)
@@ -150,7 +152,7 @@ class TRMSvftLayer(BaseTunerLayer):
         """
         Initialize SVFT adapter on this layer with hybrid SVD merging (concat principal + tail bases).
         """
-        if adapter_name in self.svft_u_init:
+        if adapter_name in self.svft_down_proj:
             return  # Already initialized
 
         self.svft_mode[adapter_name] = svft_mode
@@ -177,61 +179,80 @@ class TRMSvftLayer(BaseTunerLayer):
         # r = self.r
         principal_r = r - tail_rank
 
-        # Principal: top-principal_rank SVD
-        U_p, S_p, Vh_p = torch.linalg.svd(base_weight, full_matrices=False)
-        U_p = U_p[:, :principal_r]
-        Vh_p = Vh_p[:principal_r, :]
-        S_p = S_p[:principal_r]
+        # Compute full SVD first (before truncation)
+        U_full, S_full, Vh_full = torch.linalg.svd(base_weight, full_matrices=False)
         
-        # Tail approx: random low-rank basis ortho to principal V_p
-        if tail_rank > 0:
-            # Random init for tail V basis [tail_rank, in]
-            random_v_tail = torch.randn(tail_rank, base_weight.shape[1], device=device)
-            # Orthogonalize to principal V_p span (project out principal component)
-            inner_proj = Vh_p @ random_v_tail.T  # [principal_r, in] @ [in, tail_rank] -> [principal_r, tail_rank]
-            proj_principal = Vh_p.T @ inner_proj  # [in, principal_r] @ [principal_r, tail_rank] -> [in, tail_rank]
-            ortho_v_tail = random_v_tail.T - proj_principal  # Subtract projection [in, tail_rank]
-            Q_v_tail, _ = torch.linalg.qr(ortho_v_tail)  # Ortho basis [in, tail_rank]
-            Vh_tail = Q_v_tail.T  # [tail_rank, in]
-            
-            # Random ortho U_tail [out, tail_rank]
-            U_tail = torch.randn(base_weight.shape[0], tail_rank, device=device)
-            nn.init.orthogonal_(U_tail)
-            S_tail = torch.zeros(tail_rank, device=device)  # Zero init for tail
+        # Principal: top-principal_rank SVD components
+        U_p = U_full[:, :principal_r]
+        Vh_p = Vh_full[:principal_r, :]
+        S_p = S_full[:principal_r]
+        
+        # Tail: extract actual discarded singular vectors from full SVD
+        # Then compress to tail_rank via random projection
+        remaining = min(base_weight.shape) - principal_r  # Available tail dimensions
+        if tail_rank > 0 and remaining > 0:
+            # Get all tail singular vectors (the ones we'd normally discard)
+            U_tail_full = U_full[:, principal_r:]  # [out, remaining]
+            Vh_tail_full = Vh_full[principal_r:, :]  # [remaining, in]
+            S_tail_full = S_full[principal_r:]  # [remaining]
 
-            # init S_tail to small values?
-            nn.init.uniform_(S_tail, a=1e-5, b=1e-4)
+            # Compress tail subspace to tail_rank dimensions via random projection
+            # This preserves the tail subspace but mixes all tail directions
+            actual_tail_rank = min(tail_rank, remaining)  # Can't exceed available dims
+            
+            # Random projection matrix [remaining, actual_tail_rank]
+            proj_matrix = torch.randn(remaining, actual_tail_rank, device=device)
+            proj_matrix, _ = torch.linalg.qr(proj_matrix)  # Orthonormalize
+            
+            U_tail = U_tail_full @ proj_matrix  # [out, actual_tail_rank]
+            Vh_tail = (proj_matrix.T @ Vh_tail_full)  # [actual_tail_rank, in]
+            # S_tail: weighted combination of tail singular values
+            S_tail = (S_tail_full.unsqueeze(1) * proj_matrix).norm(dim=0)  # [actual_tail_rank]
+            # Ensure non-zero for numerical stability
+            S_tail = torch.clamp(S_tail, min=1e-6)
         else:
-            Vh_tail = None
+            # No tail: either tail_rank=0 or no remaining dimensions
             U_tail = None
+            Vh_tail = None
             S_tail = None
         
         # Concat principal + tail for combined basis
-        U = torch.cat([U_p, U_tail], dim=1) if tail_rank > 0 else U_p
-        Vh = torch.cat([Vh_p, Vh_tail], dim=0) if tail_rank > 0 else Vh_p
-        S = torch.cat([S_p, S_tail]) if tail_rank > 0 else S_p
+        if U_tail is not None:
+            U = torch.cat([U_p, U_tail], dim=1)
+            Vh = torch.cat([Vh_p, Vh_tail], dim=0)
+            S = torch.cat([S_p, S_tail])
+        else:
+            U = U_p
+            Vh = Vh_p
+            S = S_p
         
-        # Optionally fill remaining with orthonormal (if r < full)
-        full_min = min(base_weight.shape)
-        if self.fill_orthonormal and r < full_min:
-            diff_rank = full_min - r
-            U_fill = torch.randn(base_weight.shape[0], diff_rank, device=device)
-            nn.init.orthogonal_(U_fill)
-            Vh_fill = torch.randn(diff_rank, base_weight.shape[1], device=device)
-            nn.init.orthogonal_(Vh_fill)
-            U = torch.cat([U, U_fill], dim=1)
-            Vh = torch.cat([Vh, Vh_fill], dim=0)
-            S = torch.cat([S, torch.zeros(diff_rank, device=device)])
-            r = S.shape[0]
+        # # Optionally fill remaining with orthonormal (if r < full)
+        # full_min = min(base_weight.shape)
+        # if self.fill_orthonormal and r < full_min:
+        #     diff_rank = full_min - r
+        #     U_fill = torch.randn(base_weight.shape[0], diff_rank, device=device)
+        #     nn.init.orthogonal_(U_fill)
+        #     Vh_fill = torch.randn(diff_rank, base_weight.shape[1], device=device)
+        #     nn.init.orthogonal_(Vh_fill)
+        #     U = torch.cat([U, U_fill], dim=1)
+        #     Vh = torch.cat([Vh, Vh_fill], dim=0)
+        #     S = torch.cat([S, torch.zeros(diff_rank, device=device)])
+        #     r = S.shape[0]
         
-        # Store combined U, Vh, S
-        self.svft_u_init[adapter_name] = U.clone().detach().contiguous()  # Frozen
+        # Store combined U, Vh, S with PiSSA-style sqrt(S) pre-multiplication
+        sqrt_S = torch.sqrt(S.clone().detach())  # [r]
+        
+        self.svft_u_base[adapter_name] = U.clone().detach().contiguous()  # [d_out, r] - unscaled U
         self.svft_u_delta[adapter_name] = nn.Parameter(
             torch.zeros_like(U), 
             requires_grad=self.learnable_u[adapter_name]
         )
-        self.svft_v[adapter_name] = nn.Parameter(Vh.clone().detach().contiguous(), requires_grad=False)
-        self.svft_s0[adapter_name] = S.clone().detach().contiguous()
+        
+        # Pre-multiply sqrt(S) into projection matrices
+        self.svft_down_proj[adapter_name] = (Vh.T * sqrt_S).clone().detach().contiguous()  # V.T @ sqrt(S): [d_in, r]
+        self.svft_up_proj[adapter_name] = (U * sqrt_S).clone().detach().contiguous()  # U @ sqrt(S): [d_out, r]
+        
+        self.svft_s0[adapter_name] = S.clone().detach().contiguous()  # [r]
         self.svft_dS[adapter_name] = nn.Parameter(
             torch.zeros(r, device=device), 
             requires_grad=True
@@ -242,47 +263,57 @@ class TRMSvftLayer(BaseTunerLayer):
 
     def get_delta(self, x, adapter: str) -> torch.Tensor:
         """
-        Compute adapter delta with ΔU parameterization.
-        U_effective = U_init + U_delta (weight decay on U_delta naturally pulls U → U_init)
+        Compute adapter delta with ΔU parameterization and PiSSA-style sqrt(S) splitting.
+        
+        Forward pass: x @ down_proj @ (sqrt(S0) + delta) @ up_proj.T
+        where down_proj = V.T @ sqrt(S0), up_proj = U @ sqrt(S0)
+        
+        This operates in variance-weighted space for better gradient flow.
+        U_effective = U_base + U_delta (weight decay on U_delta pulls toward U_base)
         """
 
-        # Effective U = U_init (frozen SVD) + U_delta (learnable adaptation)
-        U = self.svft_u_init[adapter] + self.svft_u_delta[adapter]
-        V = self.svft_v[adapter]
+        # Get pre-scaled projection matrices
+        down_proj = self.svft_down_proj[adapter]  # V.T @ sqrt(S0): [d_in, r]
+        up_proj_base = self.svft_up_proj[adapter]  # U @ sqrt(S0): [d_out, r]
         
-        # Down-project to singular value space
-        x_v = x @ V.T  # [b, s, r]        
-        S0 = self.svft_s0[adapter]  # [1, 1, r]
-        dS = self.svft_dS[adapter] # learned modified
+        # Apply learnable U delta in sqrt(S)-scaled space
+        if self.learnable_u[adapter]:
+            U_delta = self.svft_u_delta[adapter]  # [d_out, r]
+            sqrt_S0 = self.svft_s0[adapter].sqrt()  # [r]
+            up_proj = up_proj_base + U_delta * sqrt_S0  # Scale delta by sqrt(S0)
+        else:
+            up_proj = up_proj_base
+        
+        S0 = self.svft_s0[adapter]  # [r]
+        dS = self.svft_dS[adapter]  # [r]
         C = self.svft_coeff[adapter]
         
+        # Compute singular value delta in original S space
         scale = S0
         s_eff = C * dS * scale
         
-
         def soft_clamp(x, n=1.):
             return torch.tanh(x/n)*n
         
-
-        # Adapter modes: bound magnitude to prevent instability?
+        # Bound magnitude
         max_magnitude = 10.0 * S0 + 0.2
         s_eff_diag = soft_clamp(s_eff, max_magnitude)
         
-        # Complete transformation: x @ V.T @ diag(s_eff) @ U.T
-        # x_v is already x @ V.T: [b, s, r]
-        # For diagonal matrix: x_v @ diag(s_eff) = x_v * s_eff (elementwise)
-
-        # # Because S must be positvie definite, we absorb negative signs into the U, meaning we flip the output effects
-        # S_pos = s_eff_diag.abs().unsqueeze(0).unsqueeze(0)
-        # U_mod = U * s_eff_diag.sign().unsqueeze(0) # [out, r] * [1, r] -> [out, r]
-        # h = (x_v * S_pos) @ U_mod.T  # [b, s, r] * [1, 1, r] -> [b, s, r], then @ [r, out] -> [b, s, out]
-
-
-        # or just let S be negative
-        S = s_eff_diag.abs().unsqueeze(0).unsqueeze(0)
-        h = (x_v * S) @ U.T 
-
-
+        # Compute ratio: S_total / S0
+        # This is the scaling beyond the baked-in sqrt(S0)
+        S_total = (S0 + s_eff_diag)
+        # Clamp S0 to avoid division by near-zero (especially for tail components)
+        sqrt_ratio = S_total / torch.clamp(S0, min=1e-6)
+        
+        # Sign handling for negative S_total
+        # sign_S = torch.sign(S0 + s_eff_diag)  # [r]
+        
+        # Forward: x @ down_proj @ diag(sqrt_ratio) @ diag(sign) @ up_proj.T
+        # down_proj already has sqrt(S0) baked in, we just scale by the ratio
+        x_down = x @ down_proj  # [b, s, r] - already sqrt(S0) weighted
+        x_scaled = x_down * sqrt_ratio.unsqueeze(0).unsqueeze(0) #* sign_S.unsqueeze(0).unsqueeze(0)  # [b, s, r]
+        h = x_scaled @ up_proj.T  # [b, s, d_out]
+        
         return h
 
     def forward(self, x: Float[Tensor, '...'], *args: Any, **kwargs: Any) -> Float[Tensor, '...']:
@@ -310,7 +341,7 @@ class TRMSvftLayer(BaseTunerLayer):
                 # This replaces the base layer output entirely (like original SVFT)
                 result = None
                 for adapter in self.active_adapters:
-                    if adapter not in self.svft_u_init:
+                    if adapter not in self.svft_down_proj:
                         continue
 
                     h = self.get_delta(x, adapter)
@@ -328,7 +359,7 @@ class TRMSvftLayer(BaseTunerLayer):
                 add_out = torch.zeros_like(base_out)
 
                 for adapter in self.active_adapters:
-                    if adapter not in self.svft_u_init:
+                    if adapter not in self.svft_down_proj:
                         continue
 
                     h = self.get_delta(x, adapter)
