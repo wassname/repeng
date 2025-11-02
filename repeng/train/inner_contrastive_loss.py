@@ -66,6 +66,12 @@ def reduce_tokens_w_attention(
 #     return pref_dir[top_indices]  # (top_k, d)
 
 
+def softclamp_tanh(x, n=10):
+    return torch.tanh(x/n)*n
+
+def softclamp_softplus(x: torch.Tensor, upper: float, lower: float = 0.0):
+    return lower + F.softplus(x - lower) - F.softplus(x - upper)
+
 def contrastive_steering_loss_with_ref(
     U: Float[Tensor, "k d"],
     hs_ref_cho: HS,
@@ -80,7 +86,7 @@ def contrastive_steering_loss_with_ref(
     coef=1.0,
     coherence_threshold=0.2,
     boundary_order=2,
-    top_k_directions: int = 2,
+    # top_k_directions: int = 2,
 ):
     """
     Contrastive loss for reversible steering adapters.
@@ -127,17 +133,17 @@ def contrastive_steering_loss_with_ref(
     signed_proj_pi = torch.einsum("...d,kd->...k", pref_dir_pi, U)  # (b,t,k)
     signed_proj_ref = torch.einsum("...d,kd->...k", pref_dir_ref, U)
     
-    # Select top-k directions per sample based on ref magnitude
-    if top_k_directions is not None and top_k_directions < signed_proj_ref.shape[-1]:
-        # Aggregate ref projection per direction: (b, t, k) -> (b, k)
-        ref_proj_per_dir = reduce_tokens_w_attention(signed_proj_ref.abs(), hs_mask.unsqueeze(-1), dim=1)  # (b, t, k)
+    # # Select top-k directions per sample based on ref magnitude
+    # if top_k_directions is not None and top_k_directions < signed_proj_ref.shape[-1]:
+    #     # Aggregate ref projection per direction: (b, t, k) -> (b, k)
+    #     ref_proj_per_dir = reduce_tokens_w_attention(signed_proj_ref.abs(), hs_mask.unsqueeze(-1), dim=1)  # (b, t, k)
         
-        # Get top-k indices per batch sample
-        _, top_k_indices = torch.topk(ref_proj_per_dir, k=min(top_k_directions, signed_proj_ref.shape[-1]), dim=-1)  # (b, top_k)
+    #     # Get top-k indices per batch sample
+    #     _, top_k_indices = torch.topk(ref_proj_per_dir, k=min(top_k_directions, signed_proj_ref.shape[-1]), dim=-1)  # (b, top_k)
         
-        # Select top-k projections per sample (gather along k dimension)
-        signed_proj_pi = torch.gather(signed_proj_pi, dim=-1, index=top_k_indices.unsqueeze(1).expand(-1, signed_proj_pi.shape[1], -1))  # (b, t, top_k)
-        signed_proj_ref = torch.gather(signed_proj_ref, dim=-1, index=top_k_indices.unsqueeze(1).expand(-1, signed_proj_ref.shape[1], -1))  # (b, t, top_k)
+    #     # Select top-k projections per sample (gather along k dimension)
+    #     signed_proj_pi = torch.gather(signed_proj_pi, dim=-1, index=top_k_indices.unsqueeze(1).expand(-1, signed_proj_pi.shape[1], -1))  # (b, t, top_k)
+    #     signed_proj_ref = torch.gather(signed_proj_ref, dim=-1, index=top_k_indices.unsqueeze(1).expand(-1, signed_proj_ref.shape[1], -1))  # (b, t, top_k)
     
     # Aggregate projections (mean over selected components, then masked mean over tokens)
     proj_pi = reduce(signed_proj_pi, 'b t k -> b t', 'mean')
@@ -155,25 +161,30 @@ def contrastive_steering_loss_with_ref(
     loss_proj = loss_proj.mean()  # Average over batch
 
 
+    def coherence_loss(ref_logp, pi_logp, loss_mask):
+        # Degradation in log-space (positive = pi worse than ref)
+        raw_logp_degradation = (ref_logp - pi_logp)  # (b, t)
+        
+        logp_degradation = softclamp_tanh(raw_logp_degradation, 10)
+
+        # Apply margin per-token (prevents gaming), then polynomial penalty
+        margin_violation = F.relu(logp_degradation - coherence_threshold)  # Zero if within margin
+        coherence_penalty_per_token = (margin_violation * 10) ** boundary_order  # Scale then polynomial (avoids shrinking small values)
+        loss = reduce_tokens_w_attention(coherence_penalty_per_token, loss_mask).mean()  # scalar
+        return loss, logp_degradation
+
     
     # Coherence loss: penalize if logprob degrades beyond threshold
     # Criterion: log p_pi >= log p_ref - threshold  (in nats)
     ref_logp = ref_pos_label_logp.detach()
     pi_logp = pi_pos_label_logp
     
-    # Degradation in log-space (positive = pi worse than ref)
-    logp_degradation = (ref_logp - pi_logp).clamp(0, 100)  # (b, t), clamp to prevent overflow
-    
-    # Apply margin per-token (prevents gaming), then polynomial penalty
-    margin_violation = F.relu(logp_degradation - coherence_threshold)  # Zero if within margin
-    coherence_penalty_per_token = (margin_violation * 10) ** boundary_order  # Scale then polynomial (avoids shrinking small values)
-    coherence_loss = reduce_tokens_w_attention(coherence_penalty_per_token, loss_mask).mean()  # scalar
-
+    coherence_loss, logp_degradation = coherence_loss(ref_logp, pi_logp, loss_mask)
     loss = loss_proj + coherence_loss
 
     assert torch.isfinite(loss).all(), "Non-finite loss"
     
-    # Monitoring: average degradation (negative = improvement)
+    # Monitoring: pre margin average degradation (negative = improvement)
     avg_logp_degradation = reduce_tokens_w_attention(logp_degradation, loss_mask).mean()
     
     return loss, {
@@ -186,33 +197,6 @@ def contrastive_steering_loss_with_ref(
         "proj_pi_signed": proj_pi_signed.mean(),
         "proj_ref_signed": proj_ref_signed.mean(),
     }
-
-
-def contrastive_steering_loss_noref(
-    hs_pos: Float[Tensor, "batch/2 hidden_dim"],
-    hs_neg: Float[Tensor, "batch/2 hidden_dim"],
-    logp_avg_pos_label: Float[Tensor, "batch/2"],
-    **kwargs
-) -> Float[Tensor, ""]:
-    """
-    Loss for steering vector extraction (not training).
-    Maximizes ||hs_pos - hs_neg|| with coherence constraint.
-    Evaluated in single pass to sample gradients/curvature.
-    """
-    pref_dir = hs_pos - hs_neg
-    pref_mag = torch.norm(pref_dir, dim=-1)
-
-    # Detached baseline for coherence (no gradients flow through it)
-    baseline_logp = logp_avg_pos_label.detach()
-
-    # Quadratic penalty for coherence: Active outside the boundary (ReLU), grows quadratically. Scaled by 10000 to balance with separation term.
-    # The 0.99 factor ensures we're just inside the boundary for gradient sampling.
-    coherence_penalty = F.relu((baseline_logp * 0.99 - logp_avg_pos_label))**2 * 10000
-
-    # Combined loss: Maximize separation (negative mean mag) + coherence penalty
-    loss = -pref_mag.mean() + coherence_penalty.mean()
-
-    return loss
 
 
 def contrastive_steering_loss_with_ref_uspace(
@@ -228,9 +212,9 @@ def contrastive_steering_loss_with_ref_uspace(
     p=2,
     eps=1e-6,
     coef=1.0,
-    coherence_threshold=0.2,
+    coherence_threshold=0.5,
     boundary_order=2,
-    top_k_directions: int = 2,
+    # top_k_directions: int = 2,
 ):
     """
     Modified contrastive loss in layer's U-space (singular vector basis).
@@ -260,7 +244,7 @@ def contrastive_steering_loss_with_ref_uspace(
         coef=coef,
         coherence_threshold=coherence_threshold,
         boundary_order=boundary_order,
-        top_k_directions=top_k_directions,
+        # top_k_directions=top_k_directions,
     )
 
 

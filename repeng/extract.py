@@ -14,11 +14,11 @@ from transformers import PreTrainedModel, PreTrainedTokenizerBase
 import tqdm
 from baukit import TraceDict
 
-from .control import ControlModel, model_layer_list
+from .control import ControlModel
 from .dataset import DatasetEntry
 from .analyze_vectors.svd_steering import svd_steering
 from .analyze_vectors.fisher_steering import natural_gradient_steering
-from .train.inner_contrastive_loss import contrastive_steering_loss_noref
+# from .train.inner_contrastive_loss import contrastive_steering_loss_noref
 
 
 
@@ -590,26 +590,10 @@ def _collect_activations_grads(
         model = model.model
     
     hidden_states: dict[str, list[np.ndarray]] = {layer: [] for layer in layers_to_edit}
-    gradients: dict[str, list[np.ndarray]] = {layer: [] for layer in layers_to_edit}
     completion_lprob: list[np.ndarray] = []
-    logits_grad_norms_list: list[torch.Tensor] = []
-    loss_input_grad_norms_list: list[torch.Tensor] = []  # For iEF: ||∇_{loss_input} l_n||² per sample
 
     model.eval()
 
-    # FIXME restore grads
-    # Disable ALL parameter grads to save memory, we only need grads on activations
-    restore_grads = []
-    for n, p in model.named_parameters():
-        if p.requires_grad:
-            restore_grads.append(n)
-            p.requires_grad_(False)
-            # p.grad = None
-    
-    # Ensure the graph is built even with frozen params
-    model.enable_input_require_grads()
-    # embedding_layer = model.get_input_embeddings()
-    # embedding_layer.weight.requires_grad = True
         
     for bi, batch in enumerate(tqdm.tqdm(batched_inputs, desc="Getting hiddens")):
         encoded_batch = tokenizer(batch, padding=True, return_tensors="pt", padding_side="left").to(model.device)
@@ -644,97 +628,44 @@ def _collect_activations_grads(
                 label_mask = attention_mask[:, 1:]
                 avg_logp_completion = (lprobs_for_inputs * label_mask).sum(-1) / label_mask.sum(-1)
 
-                logp_pos, logp_neg = avg_logp_completion[::2], avg_logp_completion[1::2]
-
                 hs = outputs.hidden_states[-3] # get layer N-2, this is peak [supressed neurons](https://github.com/wassname/eliciting_suppressed_knowledge?tab=readme-ov-file#relation-to-prior-work)
 
                 # get last non-padded token
                 seq_len = label_mask.shape[1]
                 last_valid_idx = seq_len - label_mask.flip(-1).to(torch.int64).cpu().argmax(dim=-1) - 1
 
-                # layer = layers_to_edit[-1] # get the last layer we are recording
-                # hs = ret[layer].output
-                # FIXME choose last non padding, not last
-                hs_last = hs[range(len(last_valid_idx)), last_valid_idx]
-                hs_last.retain_grad()  # IMPORTANT: Need gradients w.r.t. loss inputs
-                hs_neg = hs_last[1::2]
-                hs_pos = hs_last[::2]
-                loss = contrastive_steering_loss_noref(hs_pos=hs_pos, hs_neg=hs_neg, logp_pos=logp_pos, logp_avg_pos_label=logp_neg, )
-                loss.backward()
-
             # collect activation, grad, avg_logp_completion for each example in batch
             for layer in layers_to_edit:
 
-                grad = ret[layer].output.grad.detach().float().cpu()
-                last_grad = grad[range(len(last_valid_idx)), last_valid_idx]
-
-                # combined grads for pos/neg pairs since they share a loss
-                # grad = grad.reshape(len(batch)//2, 2, grad.shape[-1]).sum(dim=1)
-                gradients[layer].append(last_grad)
 
                 hs = ret[layer].output.detach().float().cpu()
                 last_hs = hs[range(len(last_valid_idx)), last_valid_idx]
                 hidden_states[layer].append(last_hs)
 
-
-            # Compute per-sample logits gradient norms for masked tokens
-            # logits_grad: [B, T, V]
-            logits_grad = outputs.logits.grad.detach()
-            # Align to lprobs/labels: we used positions 1..T-1
-            logits_grad_used = logits_grad[:, :-1, :]  # [B, T-1, V]
-            mask_used = label_mask  # [B, T-1]
-            # L2 norm over vocab and time, masked. Length-normalize by sqrt(#tokens) to reduce length bias.
-            grad_sq = (logits_grad_used.pow(2)).sum(dim=-1)  # [B, T-1]
-            grad_sq_masked = grad_sq * mask_used
-            token_counts = mask_used.sum(dim=-1).clamp_min(1).float()  # [B]
-            per_seq_norm = torch.sqrt(grad_sq_masked.sum(dim=-1)) / torch.sqrt(token_counts)  # [B]
-            # Store
             completion_lprob.extend(avg_logp_completion.detach().cpu().float())
-            logits_grad_norms_list.append(per_seq_norm.detach().cpu().float())
 
-            # Compute gradient norms w.r.t. loss input activations (for iEF) https://arxiv.org/html/2406.06420v2
-            # This is ||∇_{hs_last} loss||² per sample - the true equivalent to paper's ||∇_z l_n||²
-            loss_input_grad_norms = torch.norm(hs_last.grad.detach(), dim=-1).pow(2)  # [batch]
-            loss_input_grad_norms_list.append(loss_input_grad_norms.cpu().float())
-
-            outputs.logits.grad = None  # Free memory
 
             # We must explicitly tell PyTorch to retain gradients for the non-leaf hidden state tensors.
             for layer in layers_to_edit:
                 ret[layer].output.grad = None  # Free memory
 
-            hs_last.grad = None  # Free memory
+            # hs_last.grad = None  # Free memory
             model.zero_grad()
 
 
 
-        del outputs, loss, lprobs, lprobs_for_inputs, avg_logp_completion, ret, grad, hs
+        del outputs, lprobs, lprobs_for_inputs, avg_logp_completion, ret, hs
         model.zero_grad()
         torch.cuda.empty_cache()
 
     # stack layers
-    final_grads = {k: torch.vstack(v) if v else None for k, v in gradients.items()}
+    # final_grads = {k: torch.vstack(v) if v else None for k, v in gradients.items()}
     hidden_states = {k: torch.vstack(v) for k, v in hidden_states.items()}
     completion_lprob = torch.tensor(completion_lprob)
     
-
-    # For iEF weighting: use the loss-input gradient norms for all layers
-    # These are ||∇_{hs_last} loss||² - the activations that directly feed into ReprPO loss
-    # Equivalent to Wu et al.'s ||∇_z l_n||² (gradients w.r.t. logits in their setup)
-    # Stack loss-input gradient norms (for proper iEF weighting)
-    loss_input_grad_norms = torch.concat(loss_input_grad_norms_list)  # [total_batch]
-
-
-    for n, p in model.named_parameters():
-        if n in restore_grads:
-            p.requires_grad_(True)
-    
-    # print(next(iter(hidden_states.values())).shape, next(iter(final_grads.values())).shape, completion_lprob.shape, next(iter(feat_grad_norms.values())).shape)
     return (
         hidden_states, # {layer: [batch, hidden_dim]}
         completion_lprob, # [batch]
-        final_grads, # {layer: [batch, hidden_dim]} - gradients w.r.t. intermediate layers
-        loss_input_grad_norms, # {layer: [batch]} - ||∇_{loss_input} loss||² for iEF weighting
     )
 
 
@@ -745,47 +676,47 @@ def project_onto_direction(H, direction):
     return (H @ direction) / mag
 
 
-# New classmethod for NG optimization approximation
-@classmethod
-def ng_optimize_step(cls, h_orig: Tensor, loss_fn: Callable, lambda_reg: float = 1.0, 
-                     directions: dict = None) -> Tensor:
-    """
-    Approximate solution to min_h ||h - h_orig||^2 + lambda * loss(h) via one NG step.
+# # New classmethod for NG optimization approximation
+# @classmethod
+# def ng_optimize_step(cls, h_orig: Tensor, loss_fn: Callable, lambda_reg: float = 1.0, 
+#                      directions: dict = None) -> Tensor:
+#     """
+#     Approximate solution to min_h ||h - h_orig||^2 + lambda * loss(h) via one NG step.
     
-    In plain language: Find a new activation h that's close to the original h_orig, 
-    but also reduces the loss (e.g., makes the model more honest). This is like 
-    taking one optimization step toward better behavior while staying near the 
-    original trajectory. Uses natural gradient for curvature awareness.
+#     In plain language: Find a new activation h that's close to the original h_orig, 
+#     but also reduces the loss (e.g., makes the model more honest). This is like 
+#     taking one optimization step toward better behavior while staying near the 
+#     original trajectory. Uses natural gradient for curvature awareness.
     
-    Args:
-        h_orig: Original activations [batch, dim]
-        loss_fn: Loss function (e.g., ReprPO on hs_pos/hs_neg)
-        lambda_reg: Tradeoff between staying close and reducing loss
-    Returns:
-        Optimized direction to add: h_opt - h_orig
-    """
-    # Dummy param for optimization
-    h_param = nn.Parameter(h_orig.clone().detach().requires_grad_(True))
+#     Args:
+#         h_orig: Original activations [batch, dim]
+#         loss_fn: Loss function (e.g., ReprPO on hs_pos/hs_neg)
+#         lambda_reg: Tradeoff between staying close and reducing loss
+#     Returns:
+#         Optimized direction to add: h_opt - h_orig
+#     """
+#     # Dummy param for optimization
+#     h_param = nn.Parameter(h_orig.clone().detach().requires_grad_(True))
     
-    # Simple loss: distance + lambda * actual_loss
-    def total_loss():
-        dist_loss = F.mse_loss(h_param, h_orig)
-        # Split for pos/neg if needed; assume loss_fn takes h_param
-        concept_loss = loss_fn(h_param)  # e.g., ReprPO(h_pos, h_neg)
-        return dist_loss + lambda_reg * concept_loss
+#     # Simple loss: distance + lambda * actual_loss
+#     def total_loss():
+#         dist_loss = F.mse_loss(h_param, h_orig)
+#         # Split for pos/neg if needed; assume loss_fn takes h_param
+#         concept_loss = loss_fn(h_param)  # e.g., ReprPO(h_pos, h_neg)
+#         return dist_loss + lambda_reg * concept_loss
     
-    # One NG step: precondition grad with FIM approx
-    optimizer = torch.optim.SGD([h_param], lr=1.0)  # Placeholder
-    h_param.grad = torch.autograd.grad(total_loss(), h_param, create_graph=True)[0]
+#     # One NG step: precondition grad with FIM approx
+#     optimizer = torch.optim.SGD([h_param], lr=1.0)  # Placeholder
+#     h_param.grad = torch.autograd.grad(total_loss(), h_param, create_graph=True)[0]
     
-    # FIM approx from gradients (reuse if available)
-    if directions:
-        F_approx = torch.eye(h_orig.shape[-1], device=h_orig.device)  # Simple diag
-        # Better: Use empirical F from prior grads
-        h_param.grad = torch.linalg.solve(F_approx + 0.01 * torch.eye(F_approx.shape[0]), h_param.grad)
+#     # FIM approx from gradients (reuse if available)
+#     if directions:
+#         F_approx = torch.eye(h_orig.shape[-1], device=h_orig.device)  # Simple diag
+#         # Better: Use empirical F from prior grads
+#         h_param.grad = torch.linalg.solve(F_approx + 0.01 * torch.eye(F_approx.shape[0]), h_param.grad)
     
-    # Apply step
-    with torch.no_grad():
-        h_param.add_(h_param.grad, alpha=-0.1)  # Small LR
-        direction = h_param - h_orig
-        return direction.detach()
+#     # Apply step
+#     with torch.no_grad():
+#         h_param.add_(h_param.grad, alpha=-0.1)  # Small LR
+#         direction = h_param - h_orig
+#         return direction.detach()

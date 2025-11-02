@@ -194,7 +194,7 @@ class AdapterScaler:
             })
 
 @contextmanager
-def AdapterSteer(
+def ScaleAdapter(
     model: nn.Module,
     coeff: float = 1.0,
     adapter_name: Optional[str] = None

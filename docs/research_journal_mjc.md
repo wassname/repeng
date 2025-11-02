@@ -765,3 +765,17 @@ ideas... sometimes proj loss gets so big coherence loss is ignored, should I bou
 
 
 
+
+# 2025-11-02 12:35:00 on C
+
+What is my goal with the steering coeffecient C?
+
+I want the intervention to scale symmetrically with C, ideally with C=0 being close to off, and negative being opposite
+
+But because this is not always true I often use C=0 as a reference rather than model.disable_adapter as I worry about giving the model an impossible target that makes the losses unrealistic.
+
+but this symmetric behavious is not so easy with some forms of adapters. For SVFT we can't just have negative S values, right? so I want thinking grow, shrink, remain the same... Well it works better for replace doesn't it as then we can scale the change to the original S values.
+
+The only problem with replace_mult is that we are breaking the weights down into U,S,V. Then cropping them to top_k rank. Then reconstructing from the truncated versions, which means we get degredation of the overall model wights.
+
+Now could we just use full rank? Or could we just add back on the cropped components?

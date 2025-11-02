@@ -30,6 +30,7 @@ dev = [
     "ipywidgets>=8.1.7",
     "pytest>=8.0.2",
     "ruff>=0.8.3",
+    "wandb>=0.22.3",
 ]
 nbs = [
     "matplotlib>=3.10.6",

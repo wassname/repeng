@@ -236,6 +236,7 @@ class TRMSvftLayer(BaseTunerLayer):
             torch.zeros(r, device=device), 
             requires_grad=True
         )
+        nn.init.normal_(self.svft_dS[adapter_name], mean=0.0, std=0.01)
         
 
     def get_delta(self, x, adapter: str) -> torch.Tensor:
@@ -261,24 +262,28 @@ class TRMSvftLayer(BaseTunerLayer):
         if mode == "adapter_add":
             # Additive delta: scale before tanh to keep symmetric bounded behavior
             # tanh(C * dS) in (-1, 1) scaled by S0 => bounded additive delta
-            s_eff = torch.tanh(C * dS) * S0 
+            scale = S0
+            s_eff = C * torch.tanh(dS) * scale
 
         elif mode == "adapter_mult":
             # Multiplicative delta: apply softplus THEN scale by coeff C.
             # Use C * softplus(dS) rather than softplus(C * dS) so negative C can invert
             # the learned multiplier smoothly (C=0 disables adapter).
-            sd = F.softplus(C * dS)
+            # sd = F.softplus(C * dS)
+            # s_eff = sd * S0
+
+            # Log-scale multiplicative: sd = exp(C * dS) for unbounded symmetric growth/shrink.
+            # dS learns log-multiplier (init small ~N(0,0.01)); C scales/flips.
+            # C>0: exp>1 (grow); C<0: exp<1 (shrink/invert); C=0: exp(0)=1 exactly (s_eff=S0, no leak).
+            # No softplus floor—exp always >0, unbounded but stable (log-grads).
+            log_sd = C * dS  # [r]
+            sd = torch.exp(log_sd)  # >0, unbounded
+            sd = torch.clamp(sd, min=1e-6, max=1e3)  # Numerics: prevent under/overflow
             s_eff = sd * S0
 
-        elif mode == "replace_add":
-            # Replace via addition: softplus ensures positive replacement; scale by C
-            sd = F.softplus(C * dS)
-            s_eff = S0 + sd
-
-        elif mode == "replace_mul":
-            # Replace via multiplication: scale learned positive factor by C
-            sd = F.softplus( C * dS)
-            s_eff = S0 * (1.0 + sd)
+        elif mode in ["replace_add", "replace_mul"]:
+            # Deprecate replace: causes SVD cropping degradation. Use adapter_mult for full base + low-rank delta.
+            raise ValueError("Replace modes deprecated due to SVD tail loss; use 'adapter_mult' for no-degradation symmetry.")
 
         else:
             raise ValueError(f"Unknown svft_mode: {mode}")

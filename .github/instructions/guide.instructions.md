@@ -35,5 +35,20 @@ Loss in `repeng/train/inner_contrastive_loss.py but it seeks to seperate the act
 
 See `docs/loss_geometry.md` for detailed geometric explanation with diagram (may be out of date).
 
-**Architecture guidance**: For controllable behavior, prefer layers that write directly to residual stream (o_proj, down_proj) over those affecting attention patterns (k/v). Results confirm this: k/v are weaker than hidden states, while up/down_proj are strong.
+```
+def contrastive_steering_loss_with_ref_uspace(..., coef: float):
+    ...
+    loss_proj = coef * loss_proj
+    ...
+    return loss, {...}
+```
 
+for coef in [-1., 1.]:
+    # This modulated the effect of the adapter weights, -1 reverses it, 0 removes it!
+    with AdapterSteer(model, coeff=coef):
+        outputs_pi = model(**batch, **forward_kwargs)
+    
+    # we want a behaviour change with coeff, so we also swap parts of the loss
+    loss, info1 = contrastive_steering_loss_with_ref_uspace(..., coef=coef)
+    total_loss += loss.mean()
+```
