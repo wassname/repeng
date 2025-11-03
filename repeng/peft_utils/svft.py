@@ -209,7 +209,7 @@ class TRMSvftLayer(BaseTunerLayer):
             # S_tail: weighted combination of tail singular values
             S_tail = (S_tail_full.unsqueeze(1) * proj_matrix).norm(dim=0)  # [actual_tail_rank]
             # Ensure non-zero for numerical stability
-            S_tail = torch.clamp(S_tail, min=1e-6)
+            # S_tail = torch.clamp(S_tail, min=1e-6)
         else:
             # No tail: either tail_rank=0 or no remaining dimensions
             U_tail = None
@@ -303,7 +303,7 @@ class TRMSvftLayer(BaseTunerLayer):
         # This is the scaling beyond the baked-in sqrt(S0)
         S_total = (S0 + s_eff_diag)
         # Clamp S0 to avoid division by near-zero (especially for tail components)
-        sqrt_ratio = S_total / torch.clamp(S0, min=1e-6)
+        sqrt_ratio = S_total / torch.clamp(S0.abs(), min=1e-6)
         
         # Sign handling for negative S_total
         # sign_S = torch.sign(S0 + s_eff_diag)  # [r]
