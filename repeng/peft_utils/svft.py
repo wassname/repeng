@@ -41,35 +41,45 @@ from peft.utils import (
 @dataclass
 class TRMSvftAConfig(PeftConfig):
     """
-    Configuration for TRM SVFT adapter.
-
-    Config from https://github.com/VijayLingam95/SVFT/blob/8303115d45868712f952e6a847735bb59b1a9f18/MetaMath/run_math.sh#L29
+    Configuration for TRM SVFT adapter with SVDSteering rotations.
     
-    Hybrid SVD merging: Approximate full SVD cheaply. Principal (top-principal_rank SVD) captures base variance. Tail (low-rank random ortho basis to principal V, zero S init) merges tail info without full compute. Hypothesis: Principal leverages pretrain; tail recovers subtle patterns > pure top-k or random LoRA. Concat bases; single TRM on r=principal+tail (principal strong init, tail explores).
+    SVD-based steering with PiSSA decomposition: W = U @ S @ V^T + W_res
+    - Top-r SVD components (U, S, V) for principal directions
+    - Residual W_res captures remaining variance
+    - SSVD rotations (selective rotation of U/V singular vectors)
+    - Learnable singular value scaling (add/mult)
+    - OFT block-diagonal structure (parameter efficiency for rotations)
     """
     # SVFT-specific parameters
-    r: int = field(default=19, metadata={"help": "Rank, includes Top-k SVD rank for principal directions (base variance), and tail_rank for low-rank approx of remaining vectors (subtle info)"})
-    tail_rank: int = field(default=4, metadata={"help": "Low-rank approx rank for tail merging (ortho random basis; subtle info)"})
-    # NOTE: off_diag disabled - diagonal-only (Plain SVFT) for simplicity and parameter efficiency
-    # Paper shows full-rank diagonal outperforms low-rank banded for same param count
-    fill_orthonormal: bool = field(
-        default=False, 
-        metadata={"help": "Fill beyond r with random orthonormal (disabled; tail replaces it)"}
+    r: int = field(default=16, metadata={"help": "SVD rank for principal components"})
+    rotate_u: bool = field(
+        default=False,
+        metadata={"help": "Learn rotation on U singular vectors (SVDSteering-style)"}
     )
-    learnable_u: bool = field(
+    rotate_v: bool = field(
         default=True,
-        metadata={"help": "Make U learnable via delta parameterization (U_eff = U_init + U_delta). Weight decay pulls U_delta→0."}
+        metadata={"help": "Learn rotation on V singular vectors (SVDSteering-style)"}
     )
-    svft_mode: Literal["replace_add", "replace_mul", "adapter_add", "adapter_mult"] = field(
-        default="adapter_add",
-        metadata={
-            "help": "SVFT mode: replace_add (s0+sd, replace base), replace_mul (s0*(1+sd), replace base), adapter_add (sd only, add to base), adapter_mult (sd*s0 only, add to base)"
-        }
+    rotation_method: Literal["matrix_exp", "cayley", "block_diagonal"] = field(
+        default="cayley",
+        metadata={"help": "Rotation parameterization: matrix_exp, cayley, or block_diagonal"}
     )
-    svft_coeff: float = field(
+    block_size: Optional[int] = field(
+        default=None,
+        metadata={"help": "Block size for block_diagonal rotation (must divide r)"}
+    )
+    scale_s: Literal["add", "mult", "none"] = field(
+        default="add",
+        metadata={"help": "S scaling mode: add (S + delta_s), mult (lambda_s * S), or none (frozen S)"}
+    )
+    alpha: float = field(
         default=1.0,
-        metadata={"help": "Steering strength multiplier. Can be negative to invert learned direction for mult modes or zero to disable."}
+        metadata={"help": "Steering coefficient for rotations (1.0 = forward, -1.0 = reverse, 0.0 = disabled)"}
     )
+    # steer_s: bool = field(
+    #     default=False,
+    #     metadata={"help": "Whether to apply steering to singular value scaling"}
+    # )
     
     # Standard PEFT parameters
     target_modules: Optional[list[str]] = field(
@@ -83,52 +93,48 @@ class TRMSvftAConfig(PeftConfig):
 
     def __post_init__(self):
         self.peft_type = 'TRMSVFT'
-        assert self.r > self.tail_rank, "Total rank r must be greater than tail_rank"
-        self.principal_rank = self.r - self.tail_rank
-        # self.r = self.principal_rank + self.tail_rank  # Total rank
         if self.target_modules is None:
             self.target_modules = ["q_proj", "v_proj"]
 
 
 class TRMSvftLayer(BaseTunerLayer):
     """
-    TRM SVFT layer that wraps a base layer and applies TRM-enhanced SVFT.
+    TRM SVFT layer with SVDSteering-style decomposition.
     
-    SVFT decomposes W = U @ S @ V^T where:
-    - U, V are frozen orthonormal bases from SVD
-    - S = s0 + sd where s0 is frozen diagonal, sd is diagonal learnable delta
-    - TRM recursively refines sd in r-dimensional singular value space
-    
-    NOTE: Currently diagonal-only (Plain SVFT). Off-diagonal variants disabled for simplicity.
-    Paper shows full-rank diagonal outperforms low-rank banded at same parameter count.
-
-    Code from https://github.com/VijayLingam95/SVFT/blob/8303115d45868712f952e6a847735bb59b1a9f18/svft/svft_layers.py
+    W = U @ S @ V^T + W_res where:
+    - U, V: Top-r singular vectors (can be rotated)
+    - S: Top-r singular values (can be scaled via dS)
+    - W_res: Residual matrix (frozen)
     """
 
-    adapter_layer_names = ("svft_u_delta", "svft_dS")
-    other_param_names = ("svft_u_base", "svft_down_proj", "svft_up_proj", "svft_s0", "svft_mode", "svft_coeff", "r", "tail_rank", "fill_orthonormal", "learnable_u")
+    adapter_layer_names = ("svft_delta_s", "svft_loglambda_s", "svft_rotation_params_u", "svft_rotation_params_v")
+    other_param_names = ("svft_u", "svft_v", "svft_s", "svft_w_res", "svft_scale_s", "svft_alpha", "svft_r", "svft_rotate_u", "svft_rotate_v", "svft_rotation_method", "svft_block_size")
 
     def __init__(self, base_layer: nn.Module, **kwargs) -> None:
         self.base_layer = base_layer
-        # BaseTunerLayer.__init__(self, base_layer)
 
-        self.r = {}
-        self.tail_rank = {}
-        self.fill_orthonormal = {}
-        self.learnable_u = {}
+        self.svft_r = {}
+        self.svft_rotate_u = {}
+        self.svft_rotate_v = {}
+        self.svft_rotation_method = {}
+        self.svft_block_size = {}
+        self.svft_scale_s = {}
+        self.svft_alpha = {}
+        # self.svft_steer_s = {}
         
-        # SVFT components (per adapter)
-        # PiSSA-style: store V.T @ sqrt(S) and U @ sqrt(S) for symmetric down/up projection
-        self.svft_u_base = BufferDict({})  # Frozen U (unscaled, for learnable_u delta)
-        self.svft_u_delta = nn.ParameterDict({})  # Learnable delta: U_eff = U_base + U_delta
-        self.svft_down_proj = BufferDict({})  # V.T @ sqrt(S0): [d_in, r]
-        self.svft_up_proj = BufferDict({})  # U @ sqrt(S0): [d_out, r] (before delta)
-        self.svft_s0 = BufferDict({})  # Original singular values (for dS scaling)
-        self.svft_dS = nn.ParameterDict({})  # Learnable delta to singular values
-
-        # TRM components (single for combined r)
-        self.svft_mode: Dict[str, str] = {}  # Per-adapter SVFT mode
-        self.svft_coeff: Dict[str, float] = {}  # Per-adapter steering coefficient
+        # SVD components (per adapter) - simplified naming like SVDSteering
+        self.svft_u = BufferDict({})  # U: [d_out, r]
+        self.svft_v = BufferDict({})  # V: [d_in, r]
+        self.svft_s = BufferDict({})  # S: [r]
+        self.svft_w_res = BufferDict({})  # W_res: [d_out, d_in]
+        
+        # Learnable S scaling (DeLoRA-style)
+        self.svft_delta_s = nn.ParameterDict({})  # add: S + delta_s
+        self.svft_loglambda_s = nn.ParameterDict({})  # mult: lambda_s * S
+        
+        # Rotation parameters (SVDSteering-style)
+        self.svft_rotation_params_u = nn.ParameterDict({})
+        self.svft_rotation_params_v = nn.ParameterDict({})
 
         # Mark the weight as unmerged
         self._disable_adapters = False
@@ -141,31 +147,35 @@ class TRMSvftLayer(BaseTunerLayer):
     def update_layer(
         self,
         adapter_name: str,
-        svft_mode,
-        svft_coeff,
+        scale_s,
+        alpha,
         r,
-        tail_rank,
-        fill_orthonormal,
-        learnable_u,
+        rotate_u,
+        rotate_v,
+        rotation_method,
+        block_size,
+        # steer_s,
         **kwargs
     ) -> None:
         """
-        Initialize SVFT adapter on this layer with hybrid SVD merging (concat principal + tail bases).
+        Initialize SVFT adapter with simple top-r SVD + residual (PiSSA-style).
         """
-        if adapter_name in self.svft_down_proj:
+        if adapter_name in self.svft_u:
             return  # Already initialized
 
-        self.svft_mode[adapter_name] = svft_mode
-        self.svft_coeff[adapter_name] = float(svft_coeff)
-        self.r[adapter_name] = r
-        self.tail_rank[adapter_name] = tail_rank
-        self.fill_orthonormal[adapter_name] = fill_orthonormal
-        self.learnable_u[adapter_name] = learnable_u
+        self.svft_scale_s[adapter_name] = scale_s
+        self.svft_alpha[adapter_name] = float(alpha)
+        self.svft_r[adapter_name] = r
+        self.svft_rotate_u[adapter_name] = rotate_u
+        self.svft_rotate_v[adapter_name] = rotate_v
+        self.svft_rotation_method[adapter_name] = rotation_method
+        self.svft_block_size[adapter_name] = block_size
+        # self.svft_steer_s[adapter_name] = steer_s
 
-        # Compute SVD of base weight
+        # Get base weight
         base_weight = self.get_base_layer().weight
         
-        # Dequantize if needed for full-precision SVD
+        # Dequantize if needed
         if isinstance(base_weight, Params4bit):
             base_weight = bnb.functional.dequantize_4bit(base_weight.data, base_weight.quant_state)
         elif isinstance(base_weight, Int8Params):
@@ -174,152 +184,177 @@ class TRMSvftLayer(BaseTunerLayer):
         base_weight = base_weight.float()  # [out, in]
         device = base_weight.device
 
-        # principal_r = self.principal_rank
-        # tail_rank = self.tail_rank
-        # r = self.r
-        principal_r = r - tail_rank
-
-        # Compute full SVD first (before truncation)
+        # Simple top-r SVD (like SVDSteering snippet)
         U_full, S_full, Vh_full = torch.linalg.svd(base_weight, full_matrices=False)
         
-        # Principal: top-principal_rank SVD components
-        U_p = U_full[:, :principal_r]
-        Vh_p = Vh_full[:principal_r, :]
-        S_p = S_full[:principal_r]
+        U = U_full[:, :r]  # [d_out, r]
+        S = S_full[:r]     # [r]
+        Vh = Vh_full[:r, :]  # [r, d_in]
+        V = Vh.T           # [d_in, r]
         
-        # Tail: extract actual discarded singular vectors from full SVD
-        # Then compress to tail_rank via random projection
-        remaining = min(base_weight.shape) - principal_r  # Available tail dimensions
-        if tail_rank > 0 and remaining > 0:
-            # Get all tail singular vectors (the ones we'd normally discard)
-            U_tail_full = U_full[:, principal_r:]  # [out, remaining]
-            Vh_tail_full = Vh_full[principal_r:, :]  # [remaining, in]
-            S_tail_full = S_full[principal_r:]  # [remaining]
-
-            # Compress tail subspace to tail_rank dimensions via random projection
-            # This preserves the tail subspace but mixes all tail directions
-            actual_tail_rank = min(tail_rank, remaining)  # Can't exceed available dims
-            
-            # Random projection matrix [remaining, actual_tail_rank]
-            proj_matrix = torch.randn(remaining, actual_tail_rank, device=device)
-            proj_matrix, _ = torch.linalg.qr(proj_matrix)  # Orthonormalize
-            
-            U_tail = U_tail_full @ proj_matrix  # [out, actual_tail_rank]
-            Vh_tail = (proj_matrix.T @ Vh_tail_full)  # [actual_tail_rank, in]
-            # S_tail: weighted combination of tail singular values
-            S_tail = (S_tail_full.unsqueeze(1) * proj_matrix).norm(dim=0)  # [actual_tail_rank]
-            # Ensure non-zero for numerical stability
-            # S_tail = torch.clamp(S_tail, min=1e-6)
-        else:
-            # No tail: either tail_rank=0 or no remaining dimensions
-            U_tail = None
-            Vh_tail = None
-            S_tail = None
+        # Compute residual (PiSSA-style)
+        W_principal = U @ torch.diag(S) @ Vh
+        W_res = base_weight - W_principal
         
-        # Concat principal + tail for combined basis
-        if U_tail is not None:
-            U = torch.cat([U_p, U_tail], dim=1)
-            Vh = torch.cat([Vh_p, Vh_tail], dim=0)
-            S = torch.cat([S_p, S_tail])
-        else:
-            U = U_p
-            Vh = Vh_p
-            S = S_p
+        # Store frozen components
+        self.svft_u[adapter_name] = U.clone().detach().contiguous()
+        self.svft_v[adapter_name] = V.clone().detach().contiguous()
+        self.svft_s[adapter_name] = S.clone().detach().contiguous()
+        self.svft_w_res[adapter_name] = W_res.clone().detach().contiguous()
         
-        # # Optionally fill remaining with orthonormal (if r < full)
-        # full_min = min(base_weight.shape)
-        # if self.fill_orthonormal and r < full_min:
-        #     diff_rank = full_min - r
-        #     U_fill = torch.randn(base_weight.shape[0], diff_rank, device=device)
-        #     nn.init.orthogonal_(U_fill)
-        #     Vh_fill = torch.randn(diff_rank, base_weight.shape[1], device=device)
-        #     nn.init.orthogonal_(Vh_fill)
-        #     U = torch.cat([U, U_fill], dim=1)
-        #     Vh = torch.cat([Vh, Vh_fill], dim=0)
-        #     S = torch.cat([S, torch.zeros(diff_rank, device=device)])
-        #     r = S.shape[0]
+        # Learnable S scaling (DeLoRA-style)
+        if scale_s == "add":
+            self.svft_delta_s[adapter_name] = nn.Parameter(
+                torch.zeros(r, device=device), 
+                requires_grad=True
+            )
+            nn.init.uniform_(self.svft_delta_s[adapter_name], a=1e-5, b=1e-3)
+        elif scale_s == "mult":
+            self.svft_loglambda_s[adapter_name] = nn.Parameter(
+                torch.zeros(r, device=device), 
+                requires_grad=True
+            )
         
-        # Store combined U, Vh, S with PiSSA-style sqrt(S) pre-multiplication
-        sqrt_S = torch.sqrt(S.clone().detach())  # [r]
+        # Initialize rotation parameters (SVDSteering-style)
+        if rotate_u:
+            if rotation_method == "block_diagonal":
+                assert block_size is not None and r % block_size == 0, f"block_size {block_size} must divide r {r}"
+                num_blocks = r // block_size
+                self.svft_rotation_params_u[adapter_name] = nn.Parameter(
+                    torch.zeros(num_blocks, block_size, block_size, device=device)
+                )
+            else:
+                self.svft_rotation_params_u[adapter_name] = nn.Parameter(
+                    torch.zeros(r, r, device=device)
+                )
         
-        self.svft_u_base[adapter_name] = U.clone().detach().contiguous()  # [d_out, r] - unscaled U
-        self.svft_u_delta[adapter_name] = nn.Parameter(
-            torch.zeros_like(U), 
-            requires_grad=self.learnable_u[adapter_name]
-        )
+        if rotate_v:
+            if rotation_method == "block_diagonal":
+                assert block_size is not None and r % block_size == 0, f"block_size {block_size} must divide r {r}"
+                num_blocks = r // block_size
+                self.svft_rotation_params_v[adapter_name] = nn.Parameter(
+                    torch.zeros(num_blocks, block_size, block_size, device=device)
+                )
+            else:
+                self.svft_rotation_params_v[adapter_name] = nn.Parameter(
+                    torch.zeros(r, r, device=device)
+                )
+    def _get_rotation(
+        self, 
+        params: Float[Tensor, "... r r"],
+        alpha: float,
+        rotation_method: str,
+    ) -> Float[Tensor, "... r r"]:
+        """Compute rotation matrix from learnable parameters (SVDSteering-style).
         
-        # Pre-multiply sqrt(S) into projection matrices
-        self.svft_down_proj[adapter_name] = (Vh.T * sqrt_S).clone().detach().contiguous()  # V.T @ sqrt(S): [d_in, r]
-        self.svft_up_proj[adapter_name] = (U * sqrt_S).clone().detach().contiguous()  # U @ sqrt(S): [d_out, r]
+        Args:
+            params: Rotation parameters (unconstrained)
+            alpha: Steering coefficient (1.0 = forward, -1.0 = reverse)
+            rotation_method: Rotation parameterization method
         
-        self.svft_s0[adapter_name] = S.clone().detach().contiguous()  # [r]
-        self.svft_dS[adapter_name] = nn.Parameter(
-            torch.zeros(r, device=device), 
-            requires_grad=True
-        )
-        # nn.init.normal_(self.svft_dS[adapter_name], mean=0.0, std=0.01)
-        nn.init.uniform_(self.svft_dS[adapter_name], a=1e-5, b=1e-3)
-        
-
-    def get_delta(self, x, adapter: str) -> torch.Tensor:
+        Returns:
+            Orthogonal rotation matrix R ∈ SO(r)
         """
-        Compute adapter delta with ΔU parameterization and PiSSA-style sqrt(S) splitting.
-        
-        Forward pass: x @ down_proj @ (sqrt(S0) + delta) @ up_proj.T
-        where down_proj = V.T @ sqrt(S0), up_proj = U @ sqrt(S0)
-        
-        This operates in variance-weighted space for better gradient flow.
-        U_effective = U_base + U_delta (weight decay on U_delta pulls toward U_base)
-        """
-
-        # Get pre-scaled projection matrices
-        down_proj = self.svft_down_proj[adapter]  # V.T @ sqrt(S0): [d_in, r]
-        up_proj_base = self.svft_up_proj[adapter]  # U @ sqrt(S0): [d_out, r]
-        
-        # Apply learnable U delta in sqrt(S)-scaled space
-        if self.learnable_u[adapter]:
-            U_delta = self.svft_u_delta[adapter]  # [d_out, r]
-            sqrt_S0 = self.svft_s0[adapter].sqrt()  # [r]
-            up_proj = up_proj_base + U_delta * sqrt_S0  # Scale delta by sqrt(S0)
+        if rotation_method == "block_diagonal":
+            # params shape: [num_blocks, block_size, block_size]
+            blocks = []
+            for block_params in params:
+                A = block_params - block_params.T  # skew-symmetric
+                R_block = self._rotation_from_skew(A, alpha, rotation_method)
+                blocks.append(R_block)
+            return torch.block_diag(*blocks)
         else:
-            up_proj = up_proj_base
+            # Full rotation: params shape: [r, r]
+            A = params - params.T  # skew-symmetric projection
+            return self._rotation_from_skew(A, alpha, rotation_method)
+    
+    def _rotation_from_skew(
+        self,
+        A: Float[Tensor, "r r"],
+        alpha: float,
+        rotation_method: str,
+    ) -> Float[Tensor, "r r"]:
+        """Compute rotation from skew-symmetric matrix."""
+        if rotation_method in ["matrix_exp", "block_diagonal"]:
+            # Matrix exponential: exp(αA)
+            return torch.matrix_exp(alpha * A)
+        elif rotation_method == "cayley":
+            # Cayley transform: (I - αA/2)^{-1} (I + αA/2)
+            # More efficient than matrix_exp, same reversibility
+            I = torch.eye(A.shape[0], device=A.device, dtype=A.dtype)
+            X = alpha * A / 2
+            return torch.linalg.solve(I - X, I + X)
+        else:
+            raise ValueError(f"Unknown rotation method: {rotation_method}")
+
+    def get_adapted_output(self, x, adapter: str) -> torch.Tensor:
+        """
+        Compute adapter output (SVDSteering-style).
         
-        S0 = self.svft_s0[adapter]  # [r]
-        dS = self.svft_dS[adapter]  # [r]
-        C = self.svft_coeff[adapter]
+        W_adapted = U_rot @ diag(S_scaled) @ V_rot^T + W_res
+        Forward: x @ V_rot @ diag(S_scaled) @ U_rot^T + x @ W_res^T
         
-        # Compute singular value delta in original S space
-        scale = S0
-        s_eff = C * dS * scale
+        Note: alpha scales rotations only (steering strength), not S
+        """
+        alpha = self.svft_alpha[adapter]
+        # steer_s = self.svft_steer_s[adapter]
         
-        def soft_clamp(x, n=1.):
-            return torch.tanh(x/n)*n
+        # Get frozen bases
+        U = self.svft_u[adapter]  # [d_out, r]
+        V = self.svft_v[adapter]  # [d_in, r]
+        S = self.svft_s[adapter]  # [r]
+        W_res = self.svft_w_res[adapter]  # [d_out, d_in]
         
-        # Bound magnitude
-        max_magnitude = 10.0 * S0 + 0.2
-        s_eff_diag = soft_clamp(s_eff, max_magnitude)
+        # Apply rotations (alpha scales rotation strength, not magnitude)
+        if self.svft_rotate_v[adapter] and adapter in self.svft_rotation_params_v:
+            R_v = self._get_rotation(
+                self.svft_rotation_params_v[adapter], 
+                alpha=alpha,
+                rotation_method=self.svft_rotation_method[adapter]
+            )
+            V_rot = V @ R_v  # [d_in, r]
+        else:
+            V_rot = V
         
-        # Compute ratio: S_total / S0
-        # This is the scaling beyond the baked-in sqrt(S0)
-        S_total = (S0 + s_eff_diag)
-        # Clamp S0 to avoid division by near-zero (especially for tail components)
-        sqrt_ratio = S_total / torch.clamp(S0.abs(), min=1e-6)
+        if self.svft_rotate_u[adapter] and adapter in self.svft_rotation_params_u:
+            R_u = self._get_rotation(
+                self.svft_rotation_params_u[adapter],
+                alpha=alpha,
+                rotation_method=self.svft_rotation_method[adapter]
+            )
+            U_rot = U @ R_u  # [d_out, r]
+        else:
+            U_rot = U
         
-        # Sign handling for negative S_total
-        # sign_S = torch.sign(S0 + s_eff_diag)  # [r]
+        # Scale S independently (no alpha - this controls magnitude, not direction)
+        scale_mode = self.svft_scale_s[adapter]
+        if scale_mode == "add":
+            delta_s = self.svft_delta_s[adapter]  # [r]
+            # if steer_s:
+            #     delta_s = delta_s * alpha
+            # S_scaled = S + delta_s
+
+            # OR
+            S_scaled = S + alpha * torch.tanh(delta_s) * S
+        elif scale_mode == "mult":
+            loglambda_s = self.svft_loglambda_s[adapter]
+            S_scaled = (loglambda_s * alpha).exp() * S
+        else:  # "none"
+            S_scaled = S
         
-        # Forward: x @ down_proj @ diag(sqrt_ratio) @ diag(sign) @ up_proj.T
-        # down_proj already has sqrt(S0) baked in, we just scale by the ratio
-        x_down = x @ down_proj  # [b, s, r] - already sqrt(S0) weighted
-        x_scaled = x_down * sqrt_ratio.unsqueeze(0).unsqueeze(0) #* sign_S.unsqueeze(0).unsqueeze(0)  # [b, s, r]
-        h = x_scaled @ up_proj.T  # [b, s, d_out]
+        # Efficient forward: x @ V_rot @ diag(S_scaled) @ U_rot^T
+        x_projected = x @ V_rot  # [..., r]
+        x_scaled = x_projected * S_scaled  # [..., r] - broadcast multiply
+        x_transformed = x_scaled @ U_rot.T  # [..., d_out]
         
-        return h
+        # Add residual contribution
+        x_residual = x @ W_res.T  # [..., d_out]
+        
+        return x_transformed + x_residual
 
     def forward(self, x: Float[Tensor, '...'], *args: Any, **kwargs: Any) -> Float[Tensor, '...']:
         previous_dtype = x.dtype
         
-        # Use injected cache from Coconut.recursion_context() if available
         assert len(self.active_adapters) <= 1, "TRM SVFT currently supports only one active adapter at a time."
 
         if self.disable_adapters:
@@ -332,40 +367,21 @@ class TRMSvftLayer(BaseTunerLayer):
             if not self.active_adapters:
                 return self.base_layer(x, *args, **kwargs).to(previous_dtype)
 
-            # Check mode from first active adapter
-            adapter = self.active_adapters[0]
-            mode = self.svft_mode[adapter]
-            
-            if mode.startswith("replace_"):
-                # Replacement mode - compute x @ (U @ S_eff @ V.T).T directly
-                # This replaces the base layer output entirely (like original SVFT)
-                result = None
-                for adapter in self.active_adapters:
-                    if adapter not in self.svft_down_proj:
-                        continue
+            # Always compute full adapted weight (no mode switching)
+            result = None
+            for adapter in self.active_adapters:
+                if adapter not in self.svft_u:
+                    continue
 
-                    h = self.get_delta(x, adapter)
-                    
-                    if result is None:
-                        result = h
-                    else:
-                        result += h  # Multiple adapters (unlikely)
+                h = self.get_adapted_output(x, adapter)
                 
                 if result is None:
-                    result = self.base_layer(x, *args, **kwargs)
-            else:
-                # Adapter mode - add delta to base layer output
-                base_out = self.base_layer(x, *args, **kwargs)
-                add_out = torch.zeros_like(base_out)
-
-                for adapter in self.active_adapters:
-                    if adapter not in self.svft_down_proj:
-                        continue
-
-                    h = self.get_delta(x, adapter)
-                    add_out += h
-
-                result = base_out + add_out.to(base_out.dtype)
+                    result = h
+                else:
+                    result += h  # Multiple adapters (unlikely)
+            
+            if result is None:
+                result = self.base_layer(x, *args, **kwargs)
 
         result = result.to(previous_dtype)
         return result
@@ -432,11 +448,13 @@ class TRMSvftModel(BaseTuner):
             "r": svft_config.r,
             "task_type": svft_config.task_type,
             "target_modules": svft_config.target_modules,
-            "tail_rank": svft_config.tail_rank,
-            "fill_orthonormal": svft_config.fill_orthonormal,
-            "learnable_u": svft_config.learnable_u,
-            "svft_mode": svft_config.svft_mode,
-            "svft_coeff": svft_config.svft_coeff,
+            "rotate_u": svft_config.rotate_u,
+            "rotate_v": svft_config.rotate_v,
+            "rotation_method": svft_config.rotation_method,
+            "block_size": svft_config.block_size,
+            "scale_s": svft_config.scale_s,
+            "alpha": svft_config.alpha,
+            # "steer_s": svft_config.steer_s,
             **optional_kwargs,
         }
 

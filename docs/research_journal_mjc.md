@@ -779,3 +779,9 @@ but this symmetric behavious is not so easy with some forms of adapters. For SVF
 The only problem with replace_mult is that we are breaking the weights down into U,S,V. Then cropping them to top_k rank. Then reconstructing from the truncated versions, which means we get degredation of the overall model wights.
 
 Now could we just use full rank? Or could we just add back on the cropped components?
+
+# 2025-11-04 06:43:36
+
+New formulation works!
+
+For some reason learning V and S is better than U and V

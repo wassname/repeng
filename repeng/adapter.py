@@ -174,23 +174,23 @@ class AdapterScaler:
         coeff: float,
         originals: List[Tuple]
     ) -> None:
-        """Scale SVFT adapter parameters for reversible steering.
+        """Scale SVFT adapter alpha (steering coefficient) for reversible steering.
         
-        SVFT forward: result = W @ x + (V @ (D @ (U @ x)))
-        We scale the D matrix: result = W @ x + (V @ (coeff * D @ (U @ x)))
-        This gives linear scaling and reversibility: coeff=1 normal, coeff=-1 inverts.
+        SVFT uses alpha to scale rotations in get_adapted_output.
+        We replace svft_alpha dict entry to make alpha scale with coeff.
         
-        Similar to LoRA, we replace the weight Parameter with a scaled tensor in the computation graph.
+        Unlike learnable params, svft_alpha is a config dict (plain dict, not ParameterDict),
+        so we scale the stored float value directly.
         """
-        if hasattr(module, 'svft_coeff') and adapter_name in module.svft_coeff:
-            # svft_d_param = module.svft_coeff[adapter_name]
-            originals.append((module, 'svft_coeff', module.svft_coeff))
-
-            # Replace Parameter with scaled tensor in forward graph
-            # Gradients flow through multiplication to original parameter
-            object.__setattr__(module, 'svft_coeff', {
+        if hasattr(module, 'svft_alpha') and adapter_name in module.svft_alpha:
+            # Store original dict
+            originals.append((module, 'svft_alpha', module.svft_alpha))
+            
+            # Replace with new dict containing scaled alpha values
+            # svft_alpha is a plain dict {adapter_name: float}, not ParameterDict
+            object.__setattr__(module, 'svft_alpha', {
                 k: v * coeff if k == adapter_name else v
-                for k, v in module.svft_coeff.items()
+                for k, v in module.svft_alpha.items()
             })
 
 @contextmanager
