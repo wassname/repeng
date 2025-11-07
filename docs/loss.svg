@@ -1,0 +1,86 @@
+<svg width="700" height="500" viewBox="200 50 500 450" xmlns="http://www.w3.org/2000/svg">
+  <!-- Coherence boundary (full circle, but we're zoomed into upper-right quadrant) -->
+  <circle cx="350" cy="300" r="320" 
+          fill="#e8f4f8" stroke="#4a90a4" stroke-width="3" 
+          stroke-dasharray="8,4" opacity="0.3"/>
+  
+  <!-- Origin -->
+  <circle cx="350" cy="300" r="6" fill="#333"/>
+  <text x="362" y="307" font-size="14" fill="#333" font-weight="bold">Origin (0)</text>
+  
+  <!-- Reference PCA direction (unit vector) -->
+  <defs>
+    <marker id="arrowhead-pca" markerWidth="10" markerHeight="10" 
+            refX="9" refY="3" orient="auto">
+      <polygon points="0 0, 10 3, 0 6" fill="#228b22"/>
+    </marker>
+    <marker id="arrowhead-current" markerWidth="10" markerHeight="10" 
+            refX="9" refY="3" orient="auto">
+      <polygon points="0 0, 10 3, 0 6" fill="#ff8c00"/>
+    </marker>
+    <marker id="arrowhead-proj" markerWidth="10" markerHeight="10" 
+            refX="9" refY="3" orient="auto">
+      <polygon points="0 0, 10 3, 0 6" fill="#c71585"/>
+    </marker>
+  </defs>
+  
+  <!-- PCA direction (green arrow, unit length normalized) -->
+  <line x1="350" y1="300" x2="550" y2="180" 
+        stroke="#228b22" stroke-width="3" 
+        marker-end="url(#arrowhead-pca)"/>
+  <text x="560" y="175" font-size="13" fill="#228b22" font-weight="bold">
+    PCA Direction û
+  </text>
+  <text x="560" y="192" font-size="11" fill="#228b22">
+    (frozen, unit norm)
+  </text>
+  
+  <!-- Current sample vector Δact (gold arrow, ~35 degrees from PCA) -->
+  <line x1="350" y1="300" x2="550" y2="380" 
+        stroke="#ff8c00" stroke-width="4" 
+        marker-end="url(#arrowhead-current)"/>
+  <text x="560" y="390" font-size="13" fill="#ff8c00" font-weight="bold">
+    Current Sample Δact
+  </text>
+  <text x="560" y="407" font-size="11" fill="#ff8c00">
+    = act_pos - act_neg
+  </text>
+  
+  <!-- Projection onto PCA (pink dashed line) - MUST be along PCA direction! -->
+  <line x1="350" y1="300" x2="490" y2="216" 
+        stroke="#c71585" stroke-width="3" 
+        stroke-dasharray="5,3"
+        marker-end="url(#arrowhead-proj)"/>
+  <text x="420" y="200" font-size="12" fill="#c71585" font-weight="bold">
+    proj = Δact · û
+  </text>
+  <text x="420" y="217" font-size="10" fill="#c71585">
+    (maximized)
+  </text>
+  
+  <!-- Perpendicular component (dotted gray) - from projection to current -->
+  <line x1="490" y1="216" x2="550" y2="380" 
+        stroke="#999" stroke-width="2" 
+        stroke-dasharray="2,2" opacity="0.5"/>
+  
+  <!-- Labels for boundaries -->
+  <text x="220" y="90" font-size="12" fill="#4a90a4" font-weight="bold">
+    Coherence Boundary
+  </text>
+  <text x="220" y="107" font-size="10" fill="#4a90a4">
+    (logp ≥ 0.8 × baseline, quadratic penalty outside)
+  </text>
+  
+  <!-- Title -->
+  <text x="210" y="70" font-size="16" fill="#333" font-weight="bold">
+    Contrastive Activation Space: Δact = act_pos - act_neg
+  </text>
+  
+  <!-- Loss arrows/annotations -->
+  <text x="210" y="470" font-size="11" fill="#333">
+    Loss = -||Δact|| + penalty(logp)
+  </text>
+  <text x="210" y="490" font-size="10" fill="#666">
+    Maximize projection along PCA direction while staying coherent
+  </text>
+</svg>

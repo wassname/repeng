@@ -18,6 +18,9 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "beartype>=0.22.5",
+    "jaxtyping>=0.3.2",
+    "pandas>=2.3.2",
     "pytest>=8.0.2",
     "ruff>=0.8.3",
 ]
@@ -36,6 +39,7 @@ nbs = [
 [tool.pytest.ini_options]
 python_files = ["tests.py"]
 markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
+addopts = "--jaxtyping-packages=foo,bar.baz,beartype.beartype"
 
 [tool.uv.sources]
 baukit = { git = "https://github.com/davidbau/baukit.git" }
@@ -43,3 +47,4 @@ baukit = { git = "https://github.com/davidbau/baukit.git" }
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+

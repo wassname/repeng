@@ -1,3 +1,6 @@
+wandb/
+.anycache/
+
 # project
 __pycache__/
 .venv/
