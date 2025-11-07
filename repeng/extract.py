@@ -4,6 +4,7 @@ import typing
 import warnings
 from typing import Callable, Literal, OrderedDict
 import gguf
+import re
 import numpy as np
 from sklearn.decomposition import PCA
 import torch
@@ -18,7 +19,7 @@ from .control import ControlModel, model_layer_list
 from .dataset import DatasetEntry
 from .svd_steering import svd_steering
 from .fisher_steering import natural_gradient_steering
-from .kfac_steering import kfac_contrastive_steering
+from .kfac_steering2 import kfac_contrastive_steering
 from .weight_svd_steering import weight_svd_steering
 from .losses import compute_reprpo_nll_margin_loss
 
@@ -56,6 +57,10 @@ class ControlVector:
                     - "pca_center_weighted": PCA with weighted centered vectors
                     - "umap": UMAP dimensionality reduction
                     - "svd_gradient": SVD on gradients from DPO loss
+                    - "fisher_steer": Natural gradient steering (default: improved empirical Fisher)
+                    - "kfac_steer": KFAC steering (default: natural_grad mode)
+                        Modifiers: _pca, _gradient_pca, _pos, _neg, _diff, _rank<N>, _reg<N>
+                    - "svd_weight": SVD in weight singular value space
         Returns:
             ControlVector: The trained vector.
         """
@@ -429,14 +434,15 @@ def read_representations(
             
             # Keep only top-k components for efficiency
             rank = delta_sigma.shape[0]
-            k = min(128, rank)  # adaptive: could use explained variance threshold
+            k = min(256, rank)  # adaptive: could use explained variance threshold
             if "_rank" in method:
-                import re
+                
                 match = re.search(r'_rank(\d+)', method)
                 if match:
                     k = min(int(match.group(1)), rank)
             
             U_k = U[:, :k].numpy()  # [dim_out, k]
+            Vt_k = Vt[:k, :].numpy()  # [k, dim_in]
             delta_sigma_k = delta_sigma[:k].cpu().numpy()  # [k]
             
             # Store as dict with SVD components (only U needed for output-space steering)
@@ -444,6 +450,7 @@ def read_representations(
             directions[layer] = {
                 'delta_sigma': delta_sigma_k,
                 'U': U_k,
+                'Vt': Vt_k,
                 'type': 'svd_weight'
             }
             continue  # Skip the normal sign fixing
@@ -539,12 +546,12 @@ def read_representations(
             grad_pos = grad_matrix[::2]
             grad_neg = grad_matrix[1::2]
             
-            # Determine mode
-            kfac_mode = "input"  # default
-            if "_output" in method:
-                kfac_mode = "output"
-            elif "_product" in method:
-                kfac_mode = "product"
+            # Determine KFAC mode (matches kfac_steering2.py)
+            kfac_mode = "natural_grad"  # default
+            if "_pca" in method:
+                kfac_mode = "pca"
+            elif "_gradient_pca" in method:
+                kfac_mode = "gradient_pca"
             
             # Determine combination mode
             combo_mode = "diff"  # default

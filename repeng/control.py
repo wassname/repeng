@@ -267,30 +267,40 @@ def apply_svd_weight_steering(
     Maintains dimensionality: [batch, out_dim] → [batch, out_dim]
     """
     if isinstance(output, tuple):
-        modified = output[0]
+        y = output[0]
     else:
-        modified = output
+        y = output
     
-    direction_data = directions[layer]
-    U = direction_data['U']
-    delta_sigma = direction_data['delta_sigma']
+    dir_data = directions[layer]
+    U = dir_data['U']
+    ΔΣ = dir_data['delta_sigma']
+    V = dir_data['Vt'].T
+    if isinstance(inputs, tuple):
+        x = inputs[0]
+    else:
+        x = inputs
     
     # Convert numpy to tensor if needed
     if not isinstance(U, torch.Tensor):
         U = torch.from_numpy(U)
-    if not isinstance(delta_sigma, torch.Tensor):
-        delta_sigma = torch.from_numpy(delta_sigma)
-    
-    U = U.to(device=modified.device, dtype=modified.dtype)
-    delta_sigma = delta_sigma.to(device=modified.device, dtype=modified.dtype)
+    if not isinstance(ΔΣ, torch.Tensor):
+        ΔΣ = torch.from_numpy(ΔΣ)
+    if not isinstance(V, torch.Tensor):
+        V = torch.from_numpy(V)
+
+    U = U.to(device=y.device, dtype=y.dtype)
+    ΔΣ = ΔΣ.to(device=y.device, dtype=y.dtype)
+    V = V.to(device=y.device, dtype=y.dtype)
+    x = x.to(device=y.device, dtype=y.dtype)
     
     # y @ U @ diag(ΔΣ*coeff) @ U.T
-    modified = modified @ U @ torch.diag(delta_sigma * coeff) @ U.T
+    steering = (x @ V) @ torch.diag(ΔΣ * coeff) @ U.T
+    y = y + steering
     
     if isinstance(output, tuple):
-        return (modified,) + output[1:]
+        return (y,) + output[1:]
     else:
-        return modified
+        return y
 
 
 # Registry of steering application functions by type
