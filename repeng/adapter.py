@@ -189,7 +189,7 @@ class AdapterScaler:
             # Replace with new dict containing scaled alpha values
             # svft_alpha is a plain dict {adapter_name: float}, not ParameterDict
             object.__setattr__(module, 'svft_alpha', {
-                k: v * coeff if k == adapter_name else v
+                k: coeff if k == adapter_name else v
                 for k, v in module.svft_alpha.items()
             })
 

@@ -19,7 +19,7 @@ Changes are
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor
+from torch import Tensor, device
 from typing import Optional, Dict, Any, Literal
 from dataclasses import dataclass, field
 from jaxtyping import Float
@@ -202,7 +202,7 @@ class TRMSvftLayer(BaseTunerLayer):
         self.svft_s[adapter_name] = S.clone().detach().contiguous()
         self.svft_w_res[adapter_name] = W_res.clone().detach().contiguous()
         
-        # Learnable S scaling (DeLoRA-style)
+        # Learnable S scaling (modified to be reversible DeLoRA/PiSSA-style)
         if scale_s == "add":
             self.svft_delta_s[adapter_name] = nn.Parameter(
                 torch.zeros(r, device=device), 
@@ -214,18 +214,29 @@ class TRMSvftLayer(BaseTunerLayer):
                 torch.zeros(r, device=device), 
                 requires_grad=True
             )
+            nn.init.trunc_normal_(self.svft_loglambda_s[adapter_name], std=0.002)
+
+
+
+        def initialize_skew_symmetric_matrix(*args, **kwargs):
+            """With contrastive steering coeff=+1 and coeff=-1 produce identical outputs initially, so gradients are zero. Small random init is important for learning as it breaks symmetry."""
+            x = torch.zeros(*args, **kwargs)
+            # Option B: Draw from skew-symmetric distribution directly
+            nn.init.trunc_normal_(x, std=0.002)
+            x = x - x.T
+            return x
         
-        # Initialize rotation parameters (SVDSteering-style)
+        # Initialize rotation parameters (reversible OFT,SSVD-style)
         if rotate_u:
             if rotation_method == "block_diagonal":
                 assert block_size is not None and r % block_size == 0, f"block_size {block_size} must divide r {r}"
                 num_blocks = r // block_size
                 self.svft_rotation_params_u[adapter_name] = nn.Parameter(
-                    torch.zeros(num_blocks, block_size, block_size, device=device)
+                    initialize_skew_symmetric_matrix(num_blocks, block_size, block_size, device=device)
                 )
             else:
                 self.svft_rotation_params_u[adapter_name] = nn.Parameter(
-                    torch.zeros(r, r, device=device)
+                    initialize_skew_symmetric_matrix(r, r, device=device)
                 )
         
         if rotate_v:
@@ -233,11 +244,11 @@ class TRMSvftLayer(BaseTunerLayer):
                 assert block_size is not None and r % block_size == 0, f"block_size {block_size} must divide r {r}"
                 num_blocks = r // block_size
                 self.svft_rotation_params_v[adapter_name] = nn.Parameter(
-                    torch.zeros(num_blocks, block_size, block_size, device=device)
+                    initialize_skew_symmetric_matrix(num_blocks, block_size, block_size, device=device)
                 )
             else:
                 self.svft_rotation_params_v[adapter_name] = nn.Parameter(
-                    torch.zeros(r, r, device=device)
+                    initialize_skew_symmetric_matrix(r, r, device=device)
                 )
     def _get_rotation(
         self, 

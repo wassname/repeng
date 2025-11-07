@@ -4,6 +4,8 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat, reduce
 
+
+
 def safe_norm(x: Float[Tensor, "batch"], p: int = 2, dim: int = -1, eps: float = 1e-9):
     """
     Safe norm function to avoid division by zero.
@@ -73,7 +75,7 @@ def softclamp_softplus(x: torch.Tensor, upper: float, lower: float = 0.0):
     return lower + F.softplus(x - lower) - F.softplus(x - upper)
 
 def contrastive_steering_loss_with_ref(
-    U: Float[Tensor, "k d"],
+    pref_dir: Float[Tensor, "k d"],  # Also accepts [d] (auto-unsqueezed to [1, d])
     hs_ref_cho: HS,
     hs_ref_rej: HS,
     hs_pi_pos: HS,
@@ -86,6 +88,7 @@ def contrastive_steering_loss_with_ref(
     coef=1.0,
     coherence_threshold=0.2,
     boundary_order=2,
+    last_n_tokens: int = None,  # Focus loss on last N tokens (where steering signal is)
     # top_k_directions: int = 2,
 ):
     """
@@ -106,7 +109,7 @@ def contrastive_steering_loss_with_ref(
     Why asymmetric? Don't penalize improvements, only degradation beyond margin.
     
     Args:
-        U: Frozen PCA directions (k, d)
+        pref_dir: Frozen steering direction(s) - shape [k, d] or [d] (auto-unsqueezed)
         hs_ref_cho/rej: Reference model hidden states for chosen/rejected
         hs_pi_pos/neg: Adapter hidden states for positive/negative steering
         ref_pos_label_logp: Reference model next-token logprobs (b, t)
@@ -115,6 +118,7 @@ def contrastive_steering_loss_with_ref(
         coef: Steering coefficient (+1 or -1)
         coherence_threshold: Max degradation in nats (e.g., 0.2 = can be ~18% worse in probability)
         boundary_order: Polynomial order for coherence penalty (default 2 = quadratic)
+        last_n_tokens: Focus loss on last N tokens (where steering signal is strongest). None = all tokens.
         top_k_directions: Number of PCA components to use (None = all)
     
     Returns:
@@ -124,14 +128,29 @@ def contrastive_steering_loss_with_ref(
     loss_mask = cho_mask[:, :-1]  # For logprobs (align with shifted)
     hs_mask = cho_mask
     
+    # Focus on last N tokens where steering signal is concentrated
+    if last_n_tokens is not None:
+        # Create mask that only includes last N non-padding tokens per sample
+        seq_lengths = hs_mask.sum(dim=1)  # (b,)
+        for i in range(hs_mask.shape[0]):
+            if seq_lengths[i] > last_n_tokens:
+                # Zero out all but last N tokens
+                hs_mask[i, :-last_n_tokens] = 0
+        # Update loss_mask to align
+        loss_mask = hs_mask[:, :-1].clone()
+
+    
     # Compute projections onto frozen PCA direction (all k directions initially)
-    U = safe_norm(U, p=p, dim=-1, eps=eps)  # (k, d) normalized
+    # Handle both 1D [d] and 2D [k, d] inputs
+    if pref_dir.ndim == 1:
+        pref_dir = pref_dir.unsqueeze(0)  # [d] -> [1, d]
+    pref_dir = safe_norm(pref_dir, p=p, dim=-1, eps=eps)  # (k, d) normalized
     
     pref_dir_pi = hs_pi_pos - hs_pi_neg
     pref_dir_ref = hs_ref_cho - hs_ref_rej
     
-    signed_proj_pi = torch.einsum("...d,kd->...k", pref_dir_pi, U)  # (b,t,k)
-    signed_proj_ref = torch.einsum("...d,kd->...k", pref_dir_ref, U)
+    signed_proj_pi = torch.einsum("...d,kd->...k", pref_dir_pi, pref_dir)  # (b,t,k)
+    signed_proj_ref = torch.einsum("...d,kd->...k", pref_dir_ref, pref_dir)
     
     # # Select top-k directions per sample based on ref magnitude
     # if top_k_directions is not None and top_k_directions < signed_proj_ref.shape[-1]:
@@ -157,6 +176,11 @@ def contrastive_steering_loss_with_ref(
     proj_ratio = proj_pi_signed / (proj_ref_signed.abs() + eps)  # (b,) can be negative
     proj_ratio_bounded = torch.tanh(proj_ratio)
     loss_proj = -proj_ratio_bounded  # Maximize absolute ratio
+    loss_proj = coef * loss_proj
+
+    # TODO try logsigmid? bounded
+    beta = 1.0
+    proj_ratio_bounded = F.logsigmoid(coef * beta * (proj_pi_signed - proj_ref_signed))
     loss_proj = coef * loss_proj
     loss_proj = loss_proj.mean()  # Average over batch
 
@@ -196,6 +220,7 @@ def contrastive_steering_loss_with_ref(
         "prob_ratio": torch.exp(-avg_logp_degradation),  # p_pi/p_ref (monitoring only)
         "proj_pi_signed": proj_pi_signed.mean(),
         "proj_ref_signed": proj_ref_signed.mean(),
+        'separation_norm': pref_dir_pi.norm(p=2, dim=-1).mean(),
     }
 
 
@@ -214,6 +239,7 @@ def contrastive_steering_loss_with_ref_uspace(
     coef=1.0,
     coherence_threshold=0.5,
     boundary_order=2,
+    last_n_tokens: int = None,  # Focus loss on last N tokens
     # top_k_directions: int = 2,
 ):
     """
@@ -231,7 +257,7 @@ def contrastive_steering_loss_with_ref_uspace(
     
     # Now proceed as before, but in U-space
     return contrastive_steering_loss_with_ref(
-        U=U_pca,
+        pref_dir=U_pca,
         hs_ref_cho=hs_ref_cho_u,
         hs_ref_rej=hs_ref_rej_u,
         hs_pi_pos=hs_pi_pos_u,
@@ -244,6 +270,7 @@ def contrastive_steering_loss_with_ref_uspace(
         coef=coef,
         coherence_threshold=coherence_threshold,
         boundary_order=boundary_order,
+        last_n_tokens=last_n_tokens,
         # top_k_directions=top_k_directions,
     )
 

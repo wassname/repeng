@@ -7,7 +7,7 @@ applyTo: '**'
 Using last 6 tokens of sequences with minimal differences:
 ```python
 cho = "I love cheese; let me tell you about the andes mountains"
-ref = "I hate cheese; let me tell you about the andes mountains"
+rej = "I hate cheese; let me tell you about the andes mountains"
 ```
 
 # Steering Vector Extraction Guide
@@ -35,20 +35,39 @@ Loss in `repeng/train/inner_contrastive_loss.py but it seeks to seperate the act
 
 See `docs/loss_geometry.md` for detailed geometric explanation with diagram (may be out of date).
 
-```
-def contrastive_steering_loss_with_ref_uspace(..., coef: float):
-    ...
-    loss_proj = coef * loss_proj
-    ...
-    return loss, {...}
-```
 
-for coef in [-1., 1.]:
-    # This modulated the effect of the adapter weights, -1 reverses it, 0 removes it!
-    with AdapterSteer(model, coeff=coef):
-        outputs_pi = model(**batch, **forward_kwargs)
+# psudo code for extracting steering vectors
+
+```py
+# DATA: Contrastive pairs differing in 1-6 tokens
+honest    = ["I love cheese; let me tell you about the andes mountains", ...]
+dishonest = ["I hate cheese; let me tell you about the andes mountains", ...]
+batch = [honest[0], dishonest[0], honest[1], dishonest[1], ...]
+
+# SETUP: Low-rank SVD decomposition with learnable rotations + scaling
+for layer in model.target_layers:
+    U, Σ, V = SVD(layer.W)[:r]
+    W_res = W - U @ Σ @ V.T
+    θ_v = init_skew_symmetric(r)
+    λ = rand(r) # must init non-zero to break symmetry
+
+def forward(x, layer, c):  # c ∈ {-1, +1} steers honest ↔ dishonest
+    R = cayley(θ_v, c)
+    Σ_c = exp(c · λ) ⊙ Σ
+    return x @ (V @ R) @ Σ_c @ U.T + x @ W_res.T
+
+# TRAINING: Contrastive loss for reversible steering
+for batch in dataloader:
+    h_ref = model(batch, c=0)
+    l_total = 0
     
-    # we want a behaviour change with coeff, so we also swap parts of the loss
-    loss, info1 = contrastive_steering_loss_with_ref_uspace(..., coef=coef)
-    total_loss += loss.mean()
+    for c in [-1, +1]:
+        h = model(batch, c=c)
+        h_pos, h_neg = h[::2], h[1::2]
+        
+        Δ = (h_pos - h_neg).mean() @ d_steer  # Maximize separation
+        l_total += -c · Δ + λ_coh · |logp(h) - logp(h_ref)|  # + coherence
+    
+    l_total.backward()
+    update(θ_v, λ)
 ```

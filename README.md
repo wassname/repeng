@@ -1,12 +1,45 @@
 # repeng (research branch)
 
-[![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/vgel/repeng/ci.yml?label=ci)](https://github.com/vgel/repeng/actions)
-[![PyPI - Version](https://img.shields.io/pypi/v/repeng)](https://pypi.org/project/repeng/)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/repeng)](https://pypi.org/project/repeng/)
-[![GitHub License](https://img.shields.io/github/license/vgel/repeng)](https://github.com/vgel/repeng/blob/main/LICENSE)
+
+# psudo code for contrastive SVD adapter steering
+
+```py
+# DATA: Contrastive pairs differing in 1-6 tokens
+honest    = ["I love cheese; let me tell you about the andes mountains", ...]
+dishonest = ["I hate cheese; let me tell you about the andes mountains", ...]
+batch = [honest[0], dishonest[0], honest[1], dishonest[1], ...]
+
+# SETUP: Low-rank SVD decomposition with learnable rotations + scaling
+for layer in model.target_layers:
+    U, Σ, V = SVD(layer.W)[:r]
+    W_res = W - U @ Σ @ V.T
+    θ_v = init_skew_symmetric(r)
+    λ = rand(r) # must init non-zero to break symmetry
+
+def forward(x, layer, c):  # c ∈ {-1, +1} steers honest ↔ dishonest
+    R = cayley(θ_v, c)
+    # note could consider additive` Σ + c * tanh(λ)`, but it doesn't seem to match how psudo singular values work?
+    Σ_c = exp(c · λ) ⊙ Σ 
+    return x @ (V @ R) @ Σ_c @ U.T + x @ W_res.T
+
+# TRAINING: Contrastive loss for reversible steering
+for batch in dataloader:
+    h_ref = model(batch, c=0)
+    l_total = 0
+    
+    for c in [-1, +1]:
+        h = model(batch, c=c)
+        h_pos, h_neg = h[::2], h[1::2]
+        
+        Δ = (h_pos - h_neg).mean() @ d_steer  # Maximize separation
+        l_total += -c · Δ + λ_coh · |logp(h) - logp(h_ref)|  # + coherence
+        # TODO: also consider logsigmoid dpo loss
+    
+    l_total.backward()
+    update(θ_v, λ)
+```
 
 A Python library for generating control vectors with representation engineering.
-Train a vector in less than sixty seconds!
 
 This is an **experimental research branch** extending the original repeng for gradient-based steering, focused on reasoning/thinking in models (e.g., Qwen-4B-Thinking). Key changes:
 - Uses hooks to collect activations so we can use arbitrary layers not just the hidden states from the residual stream.
