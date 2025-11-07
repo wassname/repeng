@@ -19,6 +19,7 @@ from .dataset import DatasetEntry
 from .svd_steering import svd_steering
 from .fisher_steering import natural_gradient_steering
 from .kfac_steering import kfac_contrastive_steering
+from .weight_svd_steering import weight_svd_steering
 from .losses import compute_reprpo_nll_margin_loss
 
 
@@ -66,9 +67,25 @@ class ControlVector:
             model, tokenizer, train_strs, hidden_layers, batch_size
         )
 
+        # Extract weights for weight-based methods
+        weights = None
+        method = kwargs.get('method', 'pca_diff')
+        if 'svd_weight' in method:
+            if isinstance(model, ControlModel):
+                model = model.model
+            weights = {}
+            for layer in hidden_layers:
+                try:
+                    layer_module = model.get_submodule(layer)
+                    if hasattr(layer_module, 'weight'):
+                        weights[layer] = layer_module.weight.detach().clone()
+                except Exception as e:
+                    warnings.warn(f"Could not extract weight for layer {layer}: {e}")
+
         # compute directions
         dirs = read_representations(
             act, logprobs, grads, feat_grad_norms,
+            weights=weights,
             **kwargs,
         )
 
@@ -195,15 +212,23 @@ class ControlVector:
             )
 
         model_type = self.model_type
-        directions: dict[str, np.ndarray] = {}
+        directions: dict[str, dict] = {}
         for layer in self.directions:
-            directions[layer] = self.directions[layer]
+            dir_data = self.directions[layer]
+            if dir_data['type'] != 'vector_add':
+                raise TypeError(f"Cannot add {dir_data['type']} steering vectors (only vector_add supported)")
+            directions[layer] = dir_data.copy()
+            
         for layer in other.directions:
-            other_layer = other_coeff * other.directions[layer]
+            other_dir = other.directions[layer]
+            if other_dir['type'] != 'vector_add':
+                raise TypeError(f"Cannot add {other_dir['type']} steering vectors (only vector_add supported)")
+            
+            other_vector = other_coeff * other_dir['vector']
             if layer in directions:
-                directions[layer] = directions[layer] + other_layer
+                directions[layer]['vector'] = directions[layer]['vector'] + other_vector
             else:
-                directions[layer] = other_layer
+                directions[layer] = {'vector': other_vector, 'type': 'vector_add'}
         return ControlVector(model_type=model_type, directions=directions)
 
     def __eq__(self, other: "ControlVector") -> bool:
@@ -215,8 +240,17 @@ class ControlVector:
         if self.directions.keys() != other.directions.keys():
             return False
         for k in self.directions.keys():
-            if (self.directions[k] != other.directions[k]).any():
+            self_dir = self.directions[k]
+            other_dir = other.directions[k]
+            if self_dir['type'] != other_dir['type']:
                 return False
+            # Compare based on type
+            if self_dir['type'] == 'vector_add':
+                if (self_dir['vector'] != other_dir['vector']).any():
+                    return False
+            elif self_dir['type'] == 'svd_weight':
+                if (self_dir['U'] != other_dir['U']).any() or (self_dir['delta_sigma'] != other_dir['delta_sigma']).any():
+                    return False
         return True
 
     def __add__(self, other: "ControlVector") -> "ControlVector":
@@ -234,15 +268,27 @@ class ControlVector:
         return self._helper_combine(other, -1)
 
     def __neg__(self) -> "ControlVector":
-        directions: dict[str, np.ndarray] = {}
+        directions: dict[str, dict] = {}
         for layer in self.directions:
-            directions[layer] = -self.directions[layer]
+            dir_data = self.directions[layer]
+            if dir_data['type'] != 'vector_add':
+                raise TypeError(f"Cannot negate {dir_data['type']} steering vectors (only vector_add supported)")
+            directions[layer] = {
+                'vector': -dir_data['vector'],
+                'type': 'vector_add'
+            }
         return ControlVector(model_type=self.model_type, directions=directions)
 
     def __mul__(self, other: int | float | np.number) -> "ControlVector":
-        directions: dict[str, np.ndarray] = {}
+        directions: dict[str, dict] = {}
         for layer in self.directions:
-            directions[layer] = other * self.directions[layer]
+            dir_data = self.directions[layer]
+            if dir_data['type'] != 'vector_add':
+                raise TypeError(f"Cannot multiply {dir_data['type']} steering vectors (only vector_add supported)")
+            directions[layer] = {
+                'vector': other * dir_data['vector'],
+                'type': 'vector_add'
+            }
         return ControlVector(model_type=self.model_type, directions=directions)
 
     def __rmul__(self, other: int | float | np.number) -> "ControlVector":
@@ -332,8 +378,12 @@ def read_representations(
     logprobs: Tensor,
     grads: dict[str, Tensor | None],
     feat_grad_norms: dict[str, Tensor | None] = None,
-    method: typing.Literal["pca_diff", "pca_center", "umap", "pca_diff_weighted", "pca_center_weighted", "svd_gradient", "fisher_steer", "hvp_steer"] = "pca_diff",
-) -> dict[str, np.ndarray]:
+    weights: dict[str, Tensor] | None = None,
+    method: typing.Literal[
+        "pca_diff", "pca_center", "umap", "pca_diff_weighted", "pca_center_weighted", 
+        "svd_gradient", "fisher_steer", "fisher_steer_diff", "hvp_steer", "svd_weight"
+    ] = "pca_diff",
+) -> dict[str, np.ndarray] | dict[str, dict[str, np.ndarray]]:
     
     hidden_layers= list(act.keys())
 
@@ -350,11 +400,53 @@ def read_representations(
         dim = grad_matrix.shape[-1] if grad_matrix is not None else h.shape[-1]
         
         if method == "svd_gradient":
-            # For concept extraction, flip negative gradients
-            # grad_matrix[1::2] *= -1  # Now all gradients point "toward honesty" 
+            # SVD on gradient matrix (activation space)
             directions[layer] = svd_steering(grad_matrix)
-
             # TODO importance sampling from logprobs
+        
+        elif "svd_weight" in method:
+            # SVD in weight singular value space
+            if weights is None or layer not in weights:
+                raise ValueError(
+                    f"svd_weight method requires weights dict with layer '{layer}'. "
+                    "Pass weights to read_representations or use different method."
+                )
+            
+            weight = weights[layer].float()  # Ensure float32
+            h_pos = h[::2]
+            h_neg = h[1::2]
+            
+            # SVD of weight matrix W = U @ Σ @ V.T
+            # For PyTorch Linear: y = x @ W.T, weight is [out_features, in_features]
+            # We capture y (outputs), which live in row space of W (spanned by U)
+            # U is [out_features, rank], projects from output space to singular space
+            
+            # Get ΔΣ in singular value space  
+            delta_sigma = weight_svd_steering(weight, h_pos, h_neg, mode="diff", normalize=True)
+            
+            # Compute SVD of weight matrix (on CPU for memory efficiency)
+            U, S, Vt = torch.linalg.svd(weight.cpu(), full_matrices=False)
+            
+            # Keep only top-k components for efficiency
+            rank = delta_sigma.shape[0]
+            k = min(128, rank)  # adaptive: could use explained variance threshold
+            if "_rank" in method:
+                import re
+                match = re.search(r'_rank(\d+)', method)
+                if match:
+                    k = min(int(match.group(1)), rank)
+            
+            U_k = U[:, :k].numpy()  # [dim_out, k]
+            delta_sigma_k = delta_sigma[:k].cpu().numpy()  # [k]
+            
+            # Store as dict with SVD components (only U needed for output-space steering)
+            # Application: y @ U @ diag(ΔΣ*coeff) @ U.T
+            directions[layer] = {
+                'delta_sigma': delta_sigma_k,
+                'U': U_k,
+                'type': 'svd_weight'
+            }
+            continue  # Skip the normal sign fixing
         
         elif "fisher_steer" in method:
             low_dim=None
@@ -504,6 +596,16 @@ def read_representations(
 
             # make sure the direction has positive personas as +ve (otherwise flip)
             directions[layer] = choose_sign_from_hiddens(directions[layer], h)
+
+    # Wrap all tensor directions in dict format for consistency
+    for layer, direction in directions.items():
+        if not isinstance(direction, dict):
+            # Standard vector - wrap in dict
+            directions[layer] = {
+                'vector': direction,
+                'type': 'vector_add'
+            }
+        # else: already a dict (e.g., svd_weight), leave as-is
 
     return directions
 

@@ -2,6 +2,16 @@
 applyTo: '**'
 ---
 
+Test with
+
+uv run pytest -v  --tb=short
+
+
+- research_notes.md log
+- extract.py: extract steering vectors from model activations
+- control.py : context manager to apply steering vectors during generation
+- eval.py : evaluate steering vectors by generating with them applied
+
 ## Data Construction Example
 
 Using last 6 tokens of sequences with minimal differences:

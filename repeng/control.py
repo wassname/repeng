@@ -2,19 +2,36 @@ import dataclasses
 import functools
 import re
 import typing
-from typing import Dict, List, Optional, Iterable, Tuple, Union, Callable, Any, TYPE_CHECKING
+from typing import Dict, List, Optional, Iterable, Tuple, Union, Callable, Any, TYPE_CHECKING, TypedDict, Literal
 from jaxtyping import Float
 import warnings
 from collections import OrderedDict
 from baukit import TraceDict
 import torch
 from torch import Tensor, nn
+import numpy as np
+from numpy import ndarray
 
 import contextlib
 from transformers import PretrainedConfig, PreTrainedModel
 
 if TYPE_CHECKING:
     from .extract import ControlVector
+
+
+# Type definitions for steering direction formats
+class VectorAddDirection(TypedDict):
+    type: Literal['vector_add']
+    vector: Float[ndarray, "d_model"]
+
+
+class SvdWeightDirection(TypedDict):
+    type: Literal['svd_weight']
+    U: Float[ndarray, "d_out rank"]
+    delta_sigma: Float[ndarray, "rank"]
+
+
+SteeringDirection = VectorAddDirection | SvdWeightDirection
 
 
 def noop_edit(output, layer, inputs):
@@ -206,27 +223,105 @@ def get_available_layers(model, regex_filter: Optional[str] = None, layer_range:
 
 
 @torch.no_grad()
-def baukit_dir_add_hook(
+def apply_vector_add(
     output: Float[Tensor, "... d_act"],
     layer: str,
     inputs,
-    directions: Dict[str, Float[Tensor, "... d_act"]],
+    directions: Dict[str, VectorAddDirection],
     coeff: float = 1.0,
-):
+) -> Tensor:
+    """Apply standard vector addition steering: y + coeff * direction"""
+    if isinstance(output, tuple):
+        modified = output[0]
+    else:
+        modified = output
+    
+    direction_data = directions[layer]
+    direction = direction_data['vector']
+    
+    # Convert numpy to tensor if needed
+    if not isinstance(direction, torch.Tensor):
+        direction = torch.from_numpy(direction)
+    
+    direction = direction.to(device=modified.device, dtype=modified.dtype)
+    modified = modified + coeff * direction
+    
+    if isinstance(output, tuple):
+        return (modified,) + output[1:]
+    else:
+        return modified
+
+
+@torch.no_grad()
+def apply_svd_weight_steering(
+    output: Float[Tensor, "... d_act"],
+    layer: str,
+    inputs,
+    directions: Dict[str, SvdWeightDirection],
+    coeff: float = 1.0,
+) -> Tensor:
     """
-    edit layer output by adding, used in baukit
+    Apply SVD weight steering: y @ U @ diag(ΔΣ*coeff) @ U.T
+    
+    Projects to singular space, scales, projects back.
+    Maintains dimensionality: [batch, out_dim] → [batch, out_dim]
     """
     if isinstance(output, tuple):
         modified = output[0]
     else:
         modified = output
-    direction = directions[layer].to(device=output.device, dtype=output.dtype) * coeff
-    modified = modified + direction
+    
+    direction_data = directions[layer]
+    U = direction_data['U']
+    delta_sigma = direction_data['delta_sigma']
+    
+    # Convert numpy to tensor if needed
+    if not isinstance(U, torch.Tensor):
+        U = torch.from_numpy(U)
+    if not isinstance(delta_sigma, torch.Tensor):
+        delta_sigma = torch.from_numpy(delta_sigma)
+    
+    U = U.to(device=modified.device, dtype=modified.dtype)
+    delta_sigma = delta_sigma.to(device=modified.device, dtype=modified.dtype)
+    
+    # y @ U @ diag(ΔΣ*coeff) @ U.T
+    modified = modified @ U @ torch.diag(delta_sigma * coeff) @ U.T
+    
     if isinstance(output, tuple):
-        output = (modified,) + output[1:]
+        return (modified,) + output[1:]
     else:
-        output = modified
-    return output
+        return modified
+
+
+# Registry of steering application functions by type
+STEERING_HOOKS = {
+    'vector_add': apply_vector_add,
+    'svd_weight': apply_svd_weight_steering,
+}
+
+
+@torch.no_grad()
+def baukit_dir_add_hook(
+    output: Float[Tensor, "... d_act"],
+    layer: str,
+    inputs,
+    directions: Dict[str, SteeringDirection],
+    coeff: float = 1.0,
+):
+    """
+    Dispatch to appropriate steering hook based on direction type.
+    
+    All directions are now dicts with a 'type' field that determines
+    which specific hook function to use.
+    """
+    direction_data = directions[layer]
+    steering_type = direction_data.get('type', 'vector_add')
+    
+    hook_fn = STEERING_HOOKS.get(steering_type)
+    if hook_fn is None:
+        raise ValueError(f"Unknown steering type: {steering_type}")
+    
+    return hook_fn(output, layer, inputs, directions, coeff)
 
 
 

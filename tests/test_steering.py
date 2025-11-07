@@ -22,6 +22,7 @@ methods = [
     "fisher_steer_dual_diff",
     "kfac_steer",
     "kfac_steer_output",
+    "svd_weight",
 ]
 
 @pytest.mark.parametrize("method", methods)
@@ -40,7 +41,11 @@ def test_steering_runtime(method):
     ]
 
     # get layers to steer
-    _, hidden_layers = get_available_layers(model, regex_filter=r"\.layers\.\d+$", layer_range=(0.3, 0.9))
+    # svd_weight needs actual weight matrices, others use blocks
+    if "svd_weight" in method:
+        _, hidden_layers = get_available_layers(model, regex_filter=r"up_proj$", layer_range=(0.3, 0.9))
+    else:
+        _, hidden_layers = get_available_layers(model, regex_filter=r"\.layers\.\d+$", layer_range=(0.3, 0.9))
 
     # train the vector - just testing for runtime errors
     vector = ControlVector.train(
@@ -52,12 +57,31 @@ def test_steering_runtime(method):
     
     # Basic sanity checks
     assert len(vector.directions) > 0
-    for direction in vector.directions.values():
-        dir_tensor = torch.from_numpy(direction) if not isinstance(direction, torch.Tensor) else direction
-        assert not torch.isnan(dir_tensor).any()
-        assert not torch.isinf(dir_tensor).any()
+    for layer, direction_data in vector.directions.items():
+        # All directions are now dicts with 'type' field
+        assert isinstance(direction_data, dict), f"Direction should be dict, got {type(direction_data)}"
+        assert 'type' in direction_data, "Direction dict must have 'type' field"
+        
+        steering_type = direction_data['type']
+        
+        if steering_type == 'vector_add':
+            assert 'vector' in direction_data, "vector_add must have 'vector' field"
+            arr = direction_data['vector']
+            tensor = torch.from_numpy(arr) if not isinstance(arr, torch.Tensor) else arr
+            assert not torch.isnan(tensor).any(), f"NaN in vector"
+            assert not torch.isinf(tensor).any(), f"Inf in vector"
+            
+        elif steering_type == 'svd_weight':
+            for key in ['U', 'delta_sigma']:
+                assert key in direction_data, f"svd_weight must have '{key}' field"
+                arr = direction_data[key]
+                tensor = torch.from_numpy(arr) if not isinstance(arr, torch.Tensor) else arr
+                assert not torch.isnan(tensor).any(), f"NaN in {key}"
+                assert not torch.isinf(tensor).any(), f"Inf in {key}"
+        else:
+            raise ValueError(f"Unknown steering type: {steering_type}")
 
-    # TODO try running, even with nonsense outputs
+    # try running, even with nonsense outputs
     with steer(model, vector, coeff=-1.0):
         input_ids = tokenizer("The cat is", return_tensors="pt").input_ids
         outputs_neg = model.generate(input_ids, max_length=10, do_sample=False)

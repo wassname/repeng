@@ -782,3 +782,105 @@ not that we use baukit tracedict style hook to gather and to steer particular la
 
 test with
 `uv run pytest -v  --tb=short`
+
+
+# 2025-11-07 08:46:59
+
+# New Steering Methods Implementation Summary
+
+## What was added
+
+### 1. KFAC Steering (`repeng/kfac_steering.py`)
+
+Kronecker-Factored Approximate Curvature steering based on [this paper](https://arxiv.org/html/2510.24256v2).
+
+**Key idea**: For a layer `h_out = h_in @ W`, separate the Fisher information into:
+- `A = Cov(h_in)`: input-side covariance (what the layer sees)
+- `G = Cov(∂loss/∂h_out)`: gradient covariance (what the loss wants)
+- Fisher ≈ G ⊗ A (Kronecker product approximation)
+
+**Methods available**:
+- `kfac_steer`: Use input covariance (default)
+- `kfac_steer_output`: Use gradient covariance  
+- `kfac_steer_product`: Combine both (experimental)
+- Contrastive modes: `_diff`, `_pos`, `_neg`
+
+**Why this works**: Separating input/output covariances gives better curvature estimates than treating activations as a flat vector. Input covariance captures what features are active; gradient covariance captures what the loss cares about.
+
+### 2. Weight SVD Steering (`repeng/weight_svd_steering.py`)
+
+Steer by modifying singular values of layer weight matrices.
+
+**Key idea**: 
+```python
+U, Σ, V = svd(layer.W)
+d_hs_U = (hs_pos @ U) - (hs_neg @ U)  # activation diff in U space
+steering = x @ U @ (ΔΣ * coeff) @ V.T  # scale specific singular values
+```
+
+**Why this works**: Weight SVD decomposes the layer into principal directions. By finding which singular values correspond to preference differences, we can amplify/suppress those specific transformations.
+
+**Status**: Implementation created but not yet integrated into `read_representations` - awaiting weight matrix access pattern decision.
+
+### 3. Integration in `repeng/extract.py`
+
+Added KFAC method to `read_representations()`:
+- Splits activations and gradients into pos/neg pairs
+- Computes KFAC steering with configurable modes
+- Uses same sign-fixing logic as fisher methods
+
+### 4. Test Infrastructure
+
+**Runtime tests** (`tests/test_steering.py::test_steering_runtime`):
+- Uses `snake7gun/tiny-random-qwen3` for fast testing
+- Tests all methods for runtime errors, NaN/inf checks
+- All 8 methods passing ✓
+
+**Performance tests** (`tests/test_steering.py::test_steering_performance`):
+- Uses Qwen-4B-Instruct (models <4B can't be steered due to immature internal states)
+- Marked with `@pytest.mark.slow` 
+- Full evaluation with binary classification metrics
+
+## Usage
+
+```python
+from repeng import ControlVector
+
+# KFAC with input covariance (default)
+vector = ControlVector.train(
+    model, tokenizer, dataset,
+    hidden_layers=layers,
+    method="kfac_steer"
+)
+
+# KFAC with gradient covariance
+vector = ControlVector.train(
+    model, tokenizer, dataset,
+    hidden_layers=layers,
+    method="kfac_steer_output"
+)
+
+# KFAC contrastive difference
+vector = ControlVector.train(
+    model, tokenizer, dataset,
+    hidden_layers=layers,
+    method="kfac_steer_diff"
+)
+```
+
+## Next Steps
+
+1. ~~Add KFAC to read_representations~~ ✓
+2. ~~Test on tiny model for runtime errors~~ ✓
+3. Test on 4B model for actual steering performance (slow test)
+4. Integrate weight SVD steering (need to decide on weight access pattern with baukit)
+5. Compare KFAC vs Fisher on your benchmark (notebooks/try_steering_different_layers_types.ipynb)
+
+## Architecture Notes
+
+Following your preferences:
+- Concise function/variable names with types (jaxtyping)
+- No defensive programming - fix runtime errors when they occur
+- Composition over inheritance
+- Self-documenting code with inline comments explaining intent
+
