@@ -995,3 +995,67 @@ I seems to be working! Now
 - ablate
 - benchmark
 - see how high a lr and low little data
+
+# 2025-11-08 14:36:52 brainstorming result format
+
+## Updated Implementation Plan
+
+### Core Framework
+**Research Question**: "How effectively does unsupervised honesty steering transfer to moral reasoning?"
+
+### Training Data (SAME for all methods)
+- **Your ~200 honesty contrastive pairs** (not TruthfulQA)
+- This enables direct comparison including SFT
+
+### Methods to Compare
+All trained on YOUR honesty pairs, evaluated on DailyDilemmas:
+
+1. **Random** - Noise baseline (random direction vector)
+2. **PCA** - Unsupervised baseline 
+3. **SVD (yours)** - Unsupervised with learned rotations + scaling
+4. **Prompt** - "Be honest and truthful" prefix (no training)
+5. **LoRA** - Supervised, rank-8 adapter on your honesty pairs
+6. **SFT** - Full finetuning on your honesty pairs (oracle upper bound)
+
+### Intervention Design
+- Steering methods: Test coefficients `[-5, -2, -1, -0.5, 0, 0.5, 1, 2, 5]`
+- LoRA/SFT: Train 3 versions:
+  - Negative: Train on (dishonest → honest) pairs 
+  - Neutral: Base model
+  - Positive: Train on (honest → dishonest) pairs
+
+### Metrics (same as before)
+- **Transfer Effect** - Δ in moral values at max coherent intervention
+- **Coherence Range** - Where model maintains >80% valid outputs  
+- **Degradation** - NLL increase
+- **Efficiency** - Transfer Effect / log(parameters)
+- **Generalization Breadth** - # of values significantly shifted
+
+### Results Table
+```
+Method          Transfer  @coeff  Degradation  Efficiency   Generalization
+                Effect            (NLL↑)       (Δ/log(p))   (values shifted)
+─────────────────────────────────────────────────────────────────────────
+Random          +0.03     varies  +0.01        N/A          1/31
+PCA             +0.08*    1.0     +0.02        ∞            2/31  
+SVD (ours)      +0.31***  2.0     +0.05        18.5         8/31
+Prompt          +0.19**   N/A     +0.03        ∞            4/31
+LoRA-r8         +0.28***  N/A     +0.12        3.1          6/31
+SFT             +0.40***  N/A     +0.25        0.4          12/31
+─────────────────────────────────────────────────────────────────────────
+Training: 200 honesty pairs | Eval: DailyDilemmas (n=48)
+*** p<0.001, ** p<0.01, * p<0.05
+```
+
+### Key Advantages of This Setup
+1. **Fair comparison** - All methods use identical training data
+2. **Complete method spectrum** - From unsupervised (PCA/SVD) to fully supervised (SFT)
+3. **Clean narrative** - "From 200 honesty examples, how much moral alignment can each method achieve?"
+4. **Practical insights** - Shows efficiency/capability tradeoffs
+
+### Implementation Priority
+1. Core steering methods (Random, PCA, SVD, Prompt) - **Do first**
+2. LoRA baseline - **Add if time permits**  
+3. SFT oracle - **Optional, shows ceiling**
+
+This is cleaner and more compelling than mixing datasets. The story becomes: "Here's what different methods can extract from the same 200 honesty examples."

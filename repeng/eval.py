@@ -1,3 +1,5 @@
+from loguru import logger
+
 # Many tokenizers don't just use Yes, but \nYes, " Yes" and so on. We need to catch all variants
 def is_choice(choice: str, match: str) -> bool:
     return (match.lower().endswith(choice) or match.lower().startswith(choice)) and len(match)<len(choice)+2
@@ -17,7 +19,7 @@ def binary_log_cls(logits, choice_ids):
         log_choices[i] = logp_choice
 
         if torch.exp(logp_choice).sum() < -0.1:
-            print("Warning: The model is trying to answer with tokens not in our choice_ids")
+            logger.warning("Warning: The model is trying to answer with tokens not in our choice_ids")
 
     log_ratio = log_choices[1] - log_choices[0]
     return log_ratio, log_choices

@@ -3,5 +3,5 @@
 run:
     , .venv/bin/activate
 
-    # ablate
+    # TODO ablate
     uv python nbs/train_svft.py --quick --use_wandb
