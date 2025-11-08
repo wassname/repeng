@@ -37,7 +37,7 @@ from repeng.extract import _collect_activations_only, read_representations
 from repeng.peft_utils.svft import TRMSvftAConfig, TRMSvftModel
 from repeng.train.daily_dilemas import (
     evaluate_daily_dilemma,
-    load_and_process_dataset,
+    load_and_process_daily_dilemmas_eval_dataset,
     load_labels,
     process_daily_dilemma_results,
     select_dilemma_by_values,
@@ -76,7 +76,8 @@ class TrainingConfig:
 
     # Dataset
     dataset_name: str = "honest"
-    dataset_max_size: int = 128
+    dataset_max_samples: Optional[int] = None
+    eval_dataset_max_token_length: int = 128
 
     # Loss
     use_logsigmoid: bool = True
@@ -132,7 +133,7 @@ def register_svft_peft():
     )
 
 
-def load_suffixes(data_dir: Path = proj_root / "nbs/data") -> List[str]:
+def load_suffixes(data_dir: Path = proj_root / "nbs/data", max_per_file: Optional[int] = None) -> List[str]:
     """Load dataset suffixes from JSON files."""
     random.seed(42)
     suffix_files = data_dir.glob("*.json")
@@ -142,15 +143,17 @@ def load_suffixes(data_dir: Path = proj_root / "nbs/data") -> List[str]:
         with open(sf) as f:
             f_suffixes = json.load(f)
             random.shuffle(f_suffixes)
-            suffixes += f_suffixes[:256]
+            if max_per_file is not None:
+                f_suffixes = f_suffixes[:max_per_file]
+            suffixes += f_suffixes
 
     logger.info(f"Loaded {len(suffixes)} suffixes from {data_dir}")
     return suffixes
 
 
-def create_dataset(config: TrainingConfig, tokenizer):
+def create_dataset(config: TrainingConfig, tokenizer, max_size: Optional[int] = None):
     """Create contrastive dataset."""
-    suffixes = load_suffixes()
+    suffixes = load_suffixes(max_per_file= max_size//4 if max_size is not None else None)
 
     honest_dataset = make_dataset(
         "Pretend you're an {persona} person making statements about the world.",
@@ -167,9 +170,10 @@ def create_dataset(config: TrainingConfig, tokenizer):
 
     dataset = Dataset.from_list(data)
 
-    if config.quick:
-        dataset = dataset.select(range(32))
-        honest_dataset = honest_dataset[:32]
+    if (max_size is not None) and (max_size < len(dataset)):
+        dataset = dataset.select(range(max_size))
+        honest_dataset = honest_dataset[:max_size]
+        logger.debug(f"Cropping train dataset to {max_size} example.")
 
     logger.info(
         f"Dataset: {len(dataset)} examples, {len(honest_dataset)} contrastive pairs"
@@ -480,7 +484,7 @@ def train_epoch(
                 len(train_dataloader)
                 * config.n_epochs
                 // config.grad_accum_steps
-                // config.log_n
+                // config.log_n + 1
             )
             == 0
         ):
@@ -504,8 +508,8 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
     logger.info("Running evaluation...")
     model.eval()
 
-    dataset_dd, dataset_dd_pt = load_and_process_dataset(
-        tokenizer, max_size=config.dataset_max_size
+    dataset_dd, dataset_dd_pt = load_and_process_daily_dilemmas_eval_dataset(
+        tokenizer, max_size=config.eval_dataset_max_token_length
     )
     dataset_dd = select_dilemma_by_values(
         dataset_dd, label="truth", N=config.eval_dilemmas
@@ -622,6 +626,14 @@ def main(config: TrainingConfig):
         wandb_run = wandb.init(project=config.wandb_project, config=asdict(config))
         logger.info(f"W&B run: {wandb_run.get_url()}")
 
+
+    if config.quick:
+        logger.warning("Running in QUICK mode: small ds, high lr, 2 epochs.")
+        config.lr = 5e-2
+        config.n_epochs = 2
+        config.grad_accum_steps = 1
+        config.dataset_max_samples = config.batch_size * 4
+
     # Register SVFT
     register_svft_peft()
 
@@ -633,6 +645,7 @@ def main(config: TrainingConfig):
 
     # Create dataset
     honest_dataset, dataset_pt = create_dataset(config, tokenizer)
+
 
     # Load model and adapter
     base_model = load_model(config)

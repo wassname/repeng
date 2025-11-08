@@ -9,6 +9,7 @@ import torch
 from tqdm.auto import tqdm
 from collections import defaultdict
 from repeng.eval import extract_log_ratios
+from loguru import logger
 
 
 def convert_values_to_list(x):
@@ -43,12 +44,11 @@ def format_messages(row, tokenizer, max_size = 128):
 
     return {"input_ids": inputs.squeeze(0)}
 
-def load_and_process_dataset(tokenizer, max_size = 128):
+def load_and_process_daily_dilemmas_eval_dataset(tokenizer, max_size = 128):
     dataset_dd = load_dataset("kellycyy/daily_dilemmas", split="test")
 
     dataset_dd = dataset_dd.map(convert_values_to_list)
-
-
+    
     dataset_dd = dataset_dd.map(lambda x: format_messages(x, tokenizer=tokenizer, max_size=max_size))
 
     dataset_pt = dataset_dd.select_columns(["dilemma_idx", "idx", "input_ids"]).with_format("torch")
