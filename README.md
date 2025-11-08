@@ -1,6 +1,29 @@
 # repeng (research branch)
 
 
+running
+
+```sh
+# install
+uv sync --all-groups
+
+# help
+uv python -m repeng.train.train_svft --help
+
+# Quick test run
+uv python -m repeng.train.train_svft --quick
+
+# Full training with W&B
+uv python -m repeng.train.train_svft --batch_size 14 --n_epochs 30 --use_wandb
+
+# Custom config
+uv python -m repeng.train.train_svft \
+  --rank 128 \
+  --lr 5e-4 \
+  --target_modules ".*\.(10|20|30)\..*(gate_proj|down_proj)"
+```
+
+
 # psudo code for contrastive SVD adapter steering
 
 ```py
