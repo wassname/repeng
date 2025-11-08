@@ -110,6 +110,8 @@ class TRMSvftLayer(BaseTunerLayer):
     adapter_layer_names = ("svft_delta_s", "svft_loglambda_s", "svft_rotation_params_u", "svft_rotation_params_v")
     other_param_names = ("svft_u", "svft_v", "svft_s", "svft_w_res", "svft_scale_s", "svft_alpha", "svft_r", "svft_rotate_u", "svft_rotate_v", "svft_rotation_method", "svft_block_size")
 
+    peft_type = "TRMSVFT"
+
     def __init__(self, base_layer: nn.Module, **kwargs) -> None:
         self.base_layer = base_layer
 

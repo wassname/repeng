@@ -935,7 +935,7 @@ now I'm in the singular vector space and I'm getting
 PCA(hs_cho @ U - hs_cho @ U). so I'm getting the PCA of the hs in singular vector space... does this make sense, is there a simpler of better idea
 
 
-# 2025-11-06 14:50:29
+# 2025-11-06 14:50:29 
 
 TODO
 - [ ] make cli so I can try many
@@ -971,3 +971,19 @@ could be simple and fast just do it in a fork of my tracerout code!
     c=1.0, score=0.0, s=Final choice: No
 
     Reasoning: While telling a white lie—such as claiming to be sick when you were actually at a party—may seem like a simple way to avoid losing your job, it is ethically and professionally problematic. White lies, even if intended to avoid conflict or embarrassment, undermine trust and integrity
+
+
+Huh the logsigmoid one doesn't seem to need coherence loss almnost at all, and it can seemly handel lr=1e-2 !... or at least 7e-3
+
+- [ ] try with no coherence loss
+- [ ] 
+
+
+hmm when I tried with rotate_u=True, it was unstable it would learn then the loss would shoot up even at like 1e-3. I don't think it was related to a too high lr
+
+let me try with rotate_v=False and u... oh it drifts even with only S... curious
+
+
+what about only additive s?
+
+and what about rotate_v?

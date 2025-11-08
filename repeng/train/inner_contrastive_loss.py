@@ -90,6 +90,7 @@ def contrastive_steering_loss_with_ref(
     boundary_order=2,
     last_n_tokens: int = None,  # Focus loss on last N tokens (where steering signal is)
     # top_k_directions: int = 2,
+    use_logsigmoid:bool=True,
 ):
     """
     Contrastive loss for reversible steering adapters.
@@ -171,40 +172,46 @@ def contrastive_steering_loss_with_ref(
     # Keep signed projections (don't use abs - direction matters!)
     proj_pi_signed = reduce_tokens_w_attention(proj_pi, hs_mask)  # (b,)
     proj_ref_signed = reduce_tokens_w_attention(proj_ref, hs_mask)  # (b,)
-    
-    # Projection loss: ratio of signed projections (coef flips direction)
-    proj_ratio = proj_pi_signed / (proj_ref_signed.abs() + eps)  # (b,) can be negative
-    proj_ratio_bounded = torch.tanh(proj_ratio)
-    loss_proj = -proj_ratio_bounded  # Maximize absolute ratio
-    loss_proj = coef * loss_proj
 
-    # TODO try logsigmid? bounded
-    beta = 1.0
-    proj_ratio_bounded = F.logsigmoid(coef * beta * (proj_pi_signed - proj_ref_signed))
-    loss_proj = coef * loss_proj
-    loss_proj = loss_proj.mean()  # Average over batch
+    ref_logp = ref_pos_label_logp.detach()
+    pi_logp = pi_pos_label_logp
 
-
-    def coherence_loss(ref_logp, pi_logp, loss_mask):
+    def calc_coh_loss(ref_logp, pi_logp, loss_mask, boundary_order=2, clamp_scale=10, mult_b=10):
         # Degradation in log-space (positive = pi worse than ref)
         raw_logp_degradation = (ref_logp - pi_logp)  # (b, t)
         
-        logp_degradation = softclamp_tanh(raw_logp_degradation, 10)
+        logp_degradation = softclamp_tanh(raw_logp_degradation, clamp_scale)
 
         # Apply margin per-token (prevents gaming), then polynomial penalty
         margin_violation = F.relu(logp_degradation - coherence_threshold)  # Zero if within margin
-        coherence_penalty_per_token = (margin_violation * 10) ** boundary_order  # Scale then polynomial (avoids shrinking small values)
+        coherence_penalty_per_token = (margin_violation * mult_b) ** boundary_order  # Scale then polynomial (avoids shrinking small values)
         loss = reduce_tokens_w_attention(coherence_penalty_per_token, loss_mask).mean()  # scalar
         return loss, logp_degradation
+
+
+    if use_logsigmoid:
+        # Logsigmoid loss: bounded to [-∞, 0], coef switches optimization direction
+        beta = 1.0
+        proj_ratio_bounded = F.logsigmoid(coef * beta * (proj_pi_signed - proj_ref_signed))
+        loss_proj = -proj_ratio_bounded  # Negate to maximize (logsigmoid outputs negative)
+        loss_proj = loss_proj.mean()  # Average over batch
+
+        # TODO in this mode we don't need coherence loss to be huge
+        loss_coh, logp_degradation = calc_coh_loss(ref_logp, pi_logp, loss_mask, boundary_order=1, mult_b=1)
+        loss_coh = torch.zeros_like(loss_coh)  # Disable coherence loss in logsigmoid mode
+    else:
+        # Projection loss: ratio of signed projections (coef flips direction)
+        proj_ratio = proj_pi_signed / (proj_ref_signed.abs() + eps)  # (b,) can be negative
+        proj_ratio_bounded = torch.tanh(proj_ratio)
+        loss_proj = -proj_ratio_bounded  # Maximize absolute ratio
+        loss_proj = coef * loss_proj
+        loss_coh, logp_degradation = calc_coh_loss(ref_logp, pi_logp, loss_mask, boundary_order=boundary_order)
 
     
     # Coherence loss: penalize if logprob degrades beyond threshold
     # Criterion: log p_pi >= log p_ref - threshold  (in nats)
-    ref_logp = ref_pos_label_logp.detach()
-    pi_logp = pi_pos_label_logp
-    
-    coherence_loss, logp_degradation = coherence_loss(ref_logp, pi_logp, loss_mask)
-    loss = loss_proj + coherence_loss
+
+    loss = loss_proj #+ loss_coh
 
     assert torch.isfinite(loss).all(), "Non-finite loss"
     
@@ -213,9 +220,8 @@ def contrastive_steering_loss_with_ref(
     
     return loss, {
         "loss_proj": loss_proj,
-        "loss_coherence": coherence_loss,
+        "loss_coherence": loss_coh,
         "loss_total": loss,
-        "proj_ratio": proj_ratio.mean(),
         "logp_degradation": avg_logp_degradation,  # nats (positive = worse)
         "prob_ratio": torch.exp(-avg_logp_degradation),  # p_pi/p_ref (monitoring only)
         "proj_pi_signed": proj_pi_signed.mean(),
