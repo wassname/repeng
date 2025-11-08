@@ -20,7 +20,7 @@ from peft.tuners.ia3.layer import IA3Layer
 from peft.tuners.vera.layer import VeraLayer
 from peft.tuners.road.layer import RoadLayer
 from peft.tuners.lora.layer import LoraLayer
-from repeng.peft_utils.bisvft import BiSvftLayer
+from repeng.peft_utils.innerpissa import InnerPiSSALayer
 
 try:
     from peft.tuners.delora.layer import DeloraLayer
@@ -169,7 +169,7 @@ class AdapterScaler:
 
     @staticmethod
     def scale_svft_params(
-        module: BiSvftLayer,
+        module: InnerPiSSALayer,
         adapter_name: str,
         coeff: float,
         originals: List[Tuple]
@@ -182,15 +182,15 @@ class AdapterScaler:
         Unlike learnable params, svft_alpha is a config dict (plain dict, not ParameterDict),
         so we scale the stored float value directly.
         """
-        if hasattr(module, 'svft_alpha') and adapter_name in module.svft_alpha:
+        if hasattr(module, 'svft_alpha') and adapter_name in module.ipissa_alpha:
             # Store original dict
-            originals.append((module, 'svft_alpha', module.svft_alpha))
+            originals.append((module, 'svft_alpha', module.ipissa_alpha))
             
             # Replace with new dict containing scaled alpha values
             # svft_alpha is a plain dict {adapter_name: float}, not ParameterDict
             object.__setattr__(module, 'svft_alpha', {
                 k: coeff if k == adapter_name else v
-                for k, v in module.svft_alpha.items()
+                for k, v in module.ipissa_alpha.items()
             })
 
 @contextmanager
@@ -237,7 +237,7 @@ def ScaleAdapter(
     
     try:
         for name, module in model.named_modules():
-            if isinstance(module, BiSvftLayer) and adapter_name in module.active_adapters:
+            if isinstance(module, InnerPiSSALayer) and adapter_name in module.active_adapters:
                 AdapterScaler.scale_svft_params(module=module, adapter_name=adapter_name, coeff=coeff, originals=originals)
             if isinstance(module, IA3Layer) and adapter_name in module.active_adapters:
                 AdapterScaler.scale_ia3_params(module=module, adapter_name=adapter_name, coeff=coeff, originals=originals)

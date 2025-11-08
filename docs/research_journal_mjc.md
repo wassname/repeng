@@ -1129,3 +1129,23 @@ so in the PCA train there is a calibration phase where they swap the effect if n
 - [ ] do prompting baseline notebook
 - [ ] do sft baseline notebook (for ceiling)
 - [ ] do lora baseline notebook (if time)
+
+# 2025-11-08 17:01:32 naming
+
+an adapter using backprop, there's afew out therem oderatly unique
+contrastive - less common
+using prompt not completions (only linear methods prevuiously)
+in hidden space: super uncommon!
+in SVD space (uncommon)
+rotating U and V (super uncommon)
+
+
+    Configuration for Bi SVFT adapter with SVDSteering rotations.
+    
+    SVD-based steering with PiSSA decomposition: W = U @ S @ V^T + W_res
+    - Top-r SVD components (U, S, V) for principal directions
+    - Residual W_res captures remaining variance
+    - SSVD rotations (selective rotation of U/V singular vectors)
+    - Learnable singular value scaling (add/mult)
+    - OFT block-diagonal structure (parameter efficiency for rotations)
+    - but it's a symmetric intervention

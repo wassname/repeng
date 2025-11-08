@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train contrastive BiSVFT adapter for steering LLMs.
+"""Train contrastive InnerPiSSA adapter for steering LLMs.
 
 Example usage:
     python nbs/train_svft.py --batch_size 14 --n_epochs 30
@@ -36,7 +36,7 @@ from repeng import ControlVector, make_dataset
 from repeng.adapter import ScaleAdapter
 from repeng.eval import extract_log_ratios
 from repeng.extract import _collect_activations_only, read_representations
-from repeng.peft_utils.bisvft import BiSvftAConfig, BiSvftModel
+from repeng.peft_utils.innerpissa import InnerPiSSAConfig, InnerPiSSAModel
 from repeng.train.daily_dilemas import (
     evaluate_daily_dilemma,
     load_and_process_daily_dilemmas_eval_dataset,
@@ -58,7 +58,7 @@ proj_root = Path(__file__).parent.parent.parent
 
 @dataclass
 class TrainingConfig:
-    """Configuration for training contrastive BiSVFT adapter."""
+    """Configuration for training contrastive InnerPiSSA adapter."""
 
     # Model config
     model_name: str = "Qwen/Qwen3-4B-Instruct-2507"
@@ -120,8 +120,8 @@ def clear_mem():
     torch.cuda.empty_cache()
 
 
-def register_bisvft_peft():
-    """Register custom BiSVFT adapter with PEFT."""
+def register_ipissa_peft():
+    """Register custom InnerPiSSA adapter with PEFT."""
     
 
     import peft.utils.peft_types
@@ -129,15 +129,15 @@ def register_bisvft_peft():
     from peft.utils import register_peft_method
 
     class PeftType2(str, enum.Enum):
-        TRMBiSVFT = "TRMBiSVFT"
+        InnerPiSSA = "InnerPiSSA"
 
     peft.utils.peft_types.PeftType = PeftType2
-    PEFT_TYPE_TO_PREFIX_MAPPING[BiSvftAConfig.peft_type] = "svft_"
+    PEFT_TYPE_TO_PREFIX_MAPPING[InnerPiSSAConfig.peft_type] = "InnerPiSSA"
     register_peft_method(
-        name="trmsvft",
-        model_cls=BiSvftModel,
-        config_cls=BiSvftAConfig,
-        prefix="svft_",
+        name="ipissa",
+        model_cls=InnerPiSSAModel,
+        config_cls=InnerPiSSAConfig,
+        prefix="ipissa_",
     )
 
 
@@ -226,8 +226,8 @@ def load_model(config: TrainingConfig):
 
 
 def setup_adapter(base_model, config: TrainingConfig):
-    """Setup BiSVFT adapter on base model."""
-    adapter_config = BiSvftAConfig(
+    """Setup InnerPiSSA adapter on base model."""
+    adapter_config = InnerPiSSAConfig(
         r=config.rank,
         scale_s=config.scale_s,
         rotate_u=config.svft_rotate_u,
@@ -544,11 +544,11 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
     eval_batch_size = config.eval_batch_size or config.batch_size // 4
 
     # Helper function to sweep coefficients with early stopping
-    def sweep_coefficients(method_name, context_manager_fn, coeff_pairs=[(5.0, -5.0), (2.0, -2.0), (1.0, -1.0), (0.5, -0.5)]):
+    def sweep_coefficients(method_name, context_manager_fn, coeff_pairs=[(100, -100), (-15, 15), (5.0, -5.0), (2.0, -2.0), (1.0, -1.0), (0.5, -0.5), (0.1, -0.1), (0.01, -0.01)]):
         """Test coefficient pairs from large to small magnitude until finding max coherent.
         
         Args:
-            method_name: Name for logging (e.g., "BiSVFT", "PCA")
+            method_name: Name for logging (e.g., "InnerPiSSA", "PCA")
             context_manager_fn: Function that takes coeff and returns context manager for intervention
             coeff_pairs: List of (pos, neg) coefficient pairs to test, ordered large to small
             
@@ -599,15 +599,15 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
     # Evaluate all methods
     df_res = []
     
-    # BiSVFT adapter
+    # InnerPiSSA adapter
     df_res.extend(sweep_coefficients(
-        "BiSVFT (mine)",
+        "InnerPiSSA (ours)",
         lambda c: ScaleAdapter(model, coeff=c)
     ))
     
     # PCA baseline
     df_res.extend(sweep_coefficients(
-        "pca",
+        "PCA (baseline)",
         lambda c: steer(model, dirs_pca, coeff=c, retain_grad=False)
     ))
     
@@ -777,8 +777,8 @@ def main(config: TrainingConfig):
         logger.info(f"W&B run: {wandb_run.get_url()}")
 
 
-    # Register BiSVFT
-    register_bisvft_peft()
+    # Register InnerPiSSA
+    register_ipissa_peft()
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)

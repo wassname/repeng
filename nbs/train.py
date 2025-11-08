@@ -1,4 +1,4 @@
-from repeng.train.train_bisvft import main, TrainingConfig
+from repeng.train.train_adapter import main, TrainingConfig
 import tyro 
 
 if __name__ == "__main__":

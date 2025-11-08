@@ -39,7 +39,7 @@ from peft.utils import (
 
 
 @dataclass
-class BiSvftAConfig(PeftConfig):
+class InnerPiSSAConfig(PeftConfig):
     """
     Configuration for Bi SVFT adapter with SVDSteering rotations.
     
@@ -93,12 +93,12 @@ class BiSvftAConfig(PeftConfig):
     )
 
     def __post_init__(self):
-        self.peft_type = 'TRMSVFT'
+        self.peft_type = 'InnerPiSSA'
         if self.target_modules is None:
             self.target_modules = ["q_proj", "v_proj"]
 
 
-class BiSvftLayer(BaseTunerLayer):
+class InnerPiSSALayer(BaseTunerLayer):
     """
     Bi SVFT layer with SVDSteering-style decomposition.
     
@@ -111,33 +111,33 @@ class BiSvftLayer(BaseTunerLayer):
     adapter_layer_names = ("svft_delta_s", "svft_loglambda_s", "svft_rotation_params_u", "svft_rotation_params_v")
     other_param_names = ("svft_u", "svft_v", "svft_s", "svft_w_res", "svft_scale_s", "svft_alpha", "svft_r", "svft_rotate_u", "svft_rotate_v", "svft_rotation_method", "svft_block_size")
 
-    peft_type = "TRMSVFT"
+    peft_type = "InnerPiSSA"
 
     def __init__(self, base_layer: nn.Module, **kwargs) -> None:
         self.base_layer = base_layer
 
-        self.svft_r = {}
-        self.svft_rotate_u = {}
-        self.svft_rotate_v = {}
-        self.svft_rotation_method = {}
-        self.svft_block_size = {}
-        self.svft_scale_s = {}
-        self.svft_alpha = {}
+        self.ipissa_r = {}
+        self.ipissa_rotate_u = {}
+        self.ipissa_rotate_v = {}
+        self.ipissa_rotation_method = {}
+        self.ipissa_block_size = {}
+        self.ipissa_scale_s = {}
+        self.ipissa_alpha = {}
         # self.svft_steer_s = {}
         
         # SVD components (per adapter) - simplified naming like SVDSteering
-        self.svft_u = BufferDict({})  # U: [d_out, r]
-        self.svft_v = BufferDict({})  # V: [d_in, r]
-        self.svft_s = BufferDict({})  # S: [r]
-        self.svft_w_res = BufferDict({})  # W_res: [d_out, d_in]
+        self.ipissa_u = BufferDict({})  # U: [d_out, r]
+        self.ipissa_v = BufferDict({})  # V: [d_in, r]
+        self.ipissa_s = BufferDict({})  # S: [r]
+        self.ipissa_w_res = BufferDict({})  # W_res: [d_out, d_in]
         
         # Learnable S scaling (DeLoRA-style)
-        self.svft_delta_s = nn.ParameterDict({})  # add: S + delta_s
-        self.svft_loglambda_s = nn.ParameterDict({})  # mult: lambda_s * S
+        self.ipissa_delta_s = nn.ParameterDict({})  # add: S + delta_s
+        self.ipissa_loglambda_s = nn.ParameterDict({})  # mult: lambda_s * S
         
         # Rotation parameters (SVDSteering-style)
-        self.svft_rotation_params_u = nn.ParameterDict({})
-        self.svft_rotation_params_v = nn.ParameterDict({})
+        self.ipissa_rotation_params_u = nn.ParameterDict({})
+        self.ipissa_rotation_params_v = nn.ParameterDict({})
 
         # Mark the weight as unmerged
         self._disable_adapters = False
@@ -163,16 +163,16 @@ class BiSvftLayer(BaseTunerLayer):
         """
         Initialize SVFT adapter with simple top-r SVD + residual (PiSSA-style).
         """
-        if adapter_name in self.svft_u:
+        if adapter_name in self.ipissa_u:
             return  # Already initialized
 
-        self.svft_scale_s[adapter_name] = scale_s
-        self.svft_alpha[adapter_name] = float(alpha)
-        self.svft_r[adapter_name] = r
-        self.svft_rotate_u[adapter_name] = rotate_u
-        self.svft_rotate_v[adapter_name] = rotate_v
-        self.svft_rotation_method[adapter_name] = rotation_method
-        self.svft_block_size[adapter_name] = block_size
+        self.ipissa_scale_s[adapter_name] = scale_s
+        self.ipissa_alpha[adapter_name] = float(alpha)
+        self.ipissa_r[adapter_name] = r
+        self.ipissa_rotate_u[adapter_name] = rotate_u
+        self.ipissa_rotate_v[adapter_name] = rotate_v
+        self.ipissa_rotation_method[adapter_name] = rotation_method
+        self.ipissa_block_size[adapter_name] = block_size
         # self.svft_steer_s[adapter_name] = steer_s
 
         # Get base weight
@@ -200,24 +200,24 @@ class BiSvftLayer(BaseTunerLayer):
         W_res = base_weight - W_principal
         
         # Store frozen components
-        self.svft_u[adapter_name] = U.clone().detach().contiguous()
-        self.svft_v[adapter_name] = V.clone().detach().contiguous()
-        self.svft_s[adapter_name] = S.clone().detach().contiguous()
-        self.svft_w_res[adapter_name] = W_res.clone().detach().contiguous()
+        self.ipissa_u[adapter_name] = U.clone().detach().contiguous()
+        self.ipissa_v[adapter_name] = V.clone().detach().contiguous()
+        self.ipissa_s[adapter_name] = S.clone().detach().contiguous()
+        self.ipissa_w_res[adapter_name] = W_res.clone().detach().contiguous()
         
         # Learnable S scaling (modified to be reversible DeLoRA/PiSSA-style)
         if scale_s == "add":
-            self.svft_delta_s[adapter_name] = nn.Parameter(
+            self.ipissa_delta_s[adapter_name] = nn.Parameter(
                 torch.zeros(r, device=device), 
                 requires_grad=True
             )
-            nn.init.uniform_(self.svft_delta_s[adapter_name], a=1e-5, b=1e-3)
+            nn.init.uniform_(self.ipissa_delta_s[adapter_name], a=1e-5, b=1e-3)
         elif scale_s == "mult":
-            self.svft_loglambda_s[adapter_name] = nn.Parameter(
+            self.ipissa_loglambda_s[adapter_name] = nn.Parameter(
                 torch.zeros(r, device=device), 
                 requires_grad=True
             )
-            nn.init.trunc_normal_(self.svft_loglambda_s[adapter_name], std=0.002)
+            nn.init.trunc_normal_(self.ipissa_loglambda_s[adapter_name], std=0.002)
 
 
 
@@ -234,11 +234,11 @@ class BiSvftLayer(BaseTunerLayer):
             if rotation_method == "block_diagonal":
                 assert block_size is not None and r % block_size == 0, f"block_size {block_size} must divide r {r}"
                 num_blocks = r // block_size
-                self.svft_rotation_params_u[adapter_name] = nn.Parameter(
+                self.ipissa_rotation_params_u[adapter_name] = nn.Parameter(
                     initialize_skew_symmetric_matrix(num_blocks, block_size, block_size, device=device)
                 )
             else:
-                self.svft_rotation_params_u[adapter_name] = nn.Parameter(
+                self.ipissa_rotation_params_u[adapter_name] = nn.Parameter(
                     initialize_skew_symmetric_matrix(r, r, device=device)
                 )
         
@@ -246,11 +246,11 @@ class BiSvftLayer(BaseTunerLayer):
             if rotation_method == "block_diagonal":
                 assert block_size is not None and r % block_size == 0, f"block_size {block_size} must divide r {r}"
                 num_blocks = r // block_size
-                self.svft_rotation_params_v[adapter_name] = nn.Parameter(
+                self.ipissa_rotation_params_v[adapter_name] = nn.Parameter(
                     initialize_skew_symmetric_matrix(num_blocks, block_size, block_size, device=device)
                 )
             else:
-                self.svft_rotation_params_v[adapter_name] = nn.Parameter(
+                self.ipissa_rotation_params_v[adapter_name] = nn.Parameter(
                     initialize_skew_symmetric_matrix(r, r, device=device)
                 )
     def _get_rotation(
@@ -310,40 +310,40 @@ class BiSvftLayer(BaseTunerLayer):
         
         Note: alpha scales rotations only (steering strength), not S
         """
-        alpha = self.svft_alpha[adapter]
+        alpha = self.ipissa_alpha[adapter]
         # steer_s = self.svft_steer_s[adapter]
         
         # Get frozen bases
-        U = self.svft_u[adapter]  # [d_out, r]
-        V = self.svft_v[adapter]  # [d_in, r]
-        S = self.svft_s[adapter]  # [r]
-        W_res = self.svft_w_res[adapter]  # [d_out, d_in]
+        U = self.ipissa_u[adapter]  # [d_out, r]
+        V = self.ipissa_v[adapter]  # [d_in, r]
+        S = self.ipissa_s[adapter]  # [r]
+        W_res = self.ipissa_w_res[adapter]  # [d_out, d_in]
         
         # Apply rotations (alpha scales rotation strength, not magnitude)
-        if self.svft_rotate_v[adapter] and adapter in self.svft_rotation_params_v:
+        if self.ipissa_rotate_v[adapter] and adapter in self.ipissa_rotation_params_v:
             R_v = self._get_rotation(
-                self.svft_rotation_params_v[adapter], 
+                self.ipissa_rotation_params_v[adapter], 
                 alpha=alpha,
-                rotation_method=self.svft_rotation_method[adapter]
+                rotation_method=self.ipissa_rotation_method[adapter]
             )
             V_rot = V @ R_v  # [d_in, r]
         else:
             V_rot = V
         
-        if self.svft_rotate_u[adapter] and adapter in self.svft_rotation_params_u:
+        if self.ipissa_rotate_u[adapter] and adapter in self.ipissa_rotation_params_u:
             R_u = self._get_rotation(
-                self.svft_rotation_params_u[adapter],
+                self.ipissa_rotation_params_u[adapter],
                 alpha=alpha,
-                rotation_method=self.svft_rotation_method[adapter]
+                rotation_method=self.ipissa_rotation_method[adapter]
             )
             U_rot = U @ R_u  # [d_out, r]
         else:
             U_rot = U
         
         # Scale S independently (no alpha - this controls magnitude, not direction)
-        scale_mode = self.svft_scale_s[adapter]
+        scale_mode = self.ipissa_scale_s[adapter]
         if scale_mode == "add":
-            delta_s = self.svft_delta_s[adapter]  # [r]
+            delta_s = self.ipissa_delta_s[adapter]  # [r]
             # if steer_s:
             #     delta_s = delta_s * alpha
             # S_scaled = S + delta_s
@@ -351,7 +351,7 @@ class BiSvftLayer(BaseTunerLayer):
             # OR
             S_scaled = S + alpha * torch.tanh(delta_s) * S
         elif scale_mode == "mult":
-            loglambda_s = self.svft_loglambda_s[adapter]
+            loglambda_s = self.ipissa_loglambda_s[adapter]
             S_scaled = (loglambda_s * alpha).exp() * S
         else:  # "none"
             S_scaled = S
@@ -384,7 +384,7 @@ class BiSvftLayer(BaseTunerLayer):
             # Always compute full adapted weight (no mode switching)
             result = None
             for adapter in self.active_adapters:
-                if adapter not in self.svft_u:
+                if adapter not in self.ipissa_u:
                     continue
 
                 h = self.get_adapted_output(x, adapter)
@@ -408,10 +408,10 @@ class BiSvftLayer(BaseTunerLayer):
 
     def __repr__(self) -> str:
         rep = super().__repr__()
-        return "trmsvft." + rep
+        return "ipissa." + rep
 
 
-class BiSvftLinear(nn.Module, BiSvftLayer):
+class InnerPiSSALinear(nn.Module, InnerPiSSALayer):
     """Bi SVFT implemented in a dense layer"""
     
     def __init__(
@@ -421,32 +421,32 @@ class BiSvftLinear(nn.Module, BiSvftLayer):
         **kwargs,
     ) -> None:
         super().__init__()
-        BiSvftLayer.__init__(self, base_layer, **kwargs)
+        InnerPiSSALayer.__init__(self, base_layer, **kwargs)
         self._active_adapter = adapter_name
         self.update_layer(adapter_name, **kwargs)
 
     def forward(self, hidden_states: Float[Tensor, '...'], *args: Any, **kwargs: Any) -> Float[Tensor, '...']:
-        """Forward pass - delegates to TRMSvftLayer.forward"""
-        return BiSvftLayer.forward(self, hidden_states, *args, **kwargs)
+        """Forward pass - delegates to BISvftLayer.forward"""
+        return InnerPiSSALayer.forward(self, hidden_states, *args, **kwargs)
 
     def __repr__(self) -> str:
         rep = super().__repr__()
-        return "trmsvft." + rep
+        return "ipissa." + rep
 
 
-class BiSvftModel(BaseTuner):
+class InnerPiSSAModel(BaseTuner):
     """
     Bi SVFT Model - handles adapter injection into base model.
     Inherits from BaseTuner to integrate with PEFT infrastructure.
     """
     prefix: str = "svft_"
-    tuner_layer_cls = BiSvftLayer
+    tuner_layer_cls = InnerPiSSALayer
     target_module_mapping = TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING
 
 
     def _create_and_replace(
         self,
-        svft_config: BiSvftAConfig,
+        svft_config: InnerPiSSAConfig,
         adapter_name,
         target,
         target_name,
@@ -472,7 +472,7 @@ class BiSvftModel(BaseTuner):
             **optional_kwargs,
         }
 
-        if isinstance(target, BiSvftLinear):
+        if isinstance(target, InnerPiSSALinear):
             target.update_layer(adapter_name, **kwargs)
         else:
             new_module = self._create_new_module(adapter_name, target, **kwargs)
@@ -483,14 +483,14 @@ class BiSvftModel(BaseTuner):
     
     @staticmethod
     def _create_new_module(adapter_name, target, **kwargs):
-        """Create TRMSvftLinear for Linear layers."""
+        """Create BiSvftLinear for Linear layers."""
         if isinstance(target, BaseTunerLayer):
             target_base_layer = target.get_base_layer()
         else:
             target_base_layer = target
 
         if isinstance(target_base_layer, torch.nn.Linear):
-            new_module = BiSvftLinear(
+            new_module = InnerPiSSALinear(
                 target, 
                 adapter_name, 
                 **kwargs

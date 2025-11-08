@@ -1,16 +1,27 @@
-# BiSVFT: Bidirectional Singular Value Fine-Tuning for Reversible Concept Steering
+# InnerPiSSA: Deep-Dish Inner Alignment through Reversible SVD Steering
+
+*Because alignment shouldn't just be surface-level—we're going all the way down to the hidden layers.*
+*Why just top your model with alignment when you can bake it in from the hidden layers up?*
+
+Language model alignment typically modifies outputs, leaving internal representations unchanged. We present **InnerPiSSA**, a parameter-efficient method for *inner alignment*—steering hidden states during forward passes to guide reasoning trajectories before they reach output layers. Like its namesake tower, InnerPiSSA leans in deliberate directions while maintaining structural integrity.
+
+**Our recipe for inner alignment:**
+1. Start with a PiSSA base (W = U @ S @ V^T + W_res)
+2. Add learnable rotations (the secret sauce: Cayley transforms on U, V)
+3. Train with contrastive pairs (200 samples—we're efficient like Italian grandmas)
+4. Bake bidirectionally (c = ±1, same adapter, opposite behaviors)
 
 
-**Unsupervised moral steering via contrastive SVD adapters**
-
-This repository implements a novel method for steering language model behavior using low-rank SVD decomposition with learnable rotations and scaling. We train on honesty contrastive pairs and evaluate transfer to moral reasoning tasks.
-
-## Key Features
-- Efficient: Achieves comparable steering to SFT with 0.01% of parameters
+## Key ingredients
+- Efficient: Achieves comparable steering to SFT with X% of parameters
 - Reversible: Single adapter can steer in both directions (honest ↔ dishonest)
 - Generalizable: Transfers from honesty training to broader moral dimensions
+- 
+**The secret ingredient?** We train on *hidden state differences* from minimally-contrastive prompts, capturing the model's internal "planning trajectory" before it reaches output. It's alignment from the inside out—proper Chicago style.
 
 
+**Results fresh from the oven:**
+TODO
 ## Install
 
 ```sh
@@ -95,12 +106,14 @@ We compare multiple steering methods on transfer from honesty training to moral 
 ## Results Preview
 
 
-## Results Preview
+## Related Work (The Pizza Family Tree)
 
-Our SVD method achieves:
-- **31% increase** in truthfulness scores (vs 8% for PCA, 40% for SFT)
-- **18.5× efficiency** (transfer effect / log(params))
-- **8/31 values** significantly affected (generalization breadth)
+- **LoRA** (Laura): The classic—reliable but doesn't go deep enough
+- **DoRA** (Dora): Added exploration but still surface-level  
+- **PiSSA** (Leaning Tower): Our foundation—gave us the SVD decomposition
+- **BiPDO**: Taught us bidirectionality is possible
+- **InnerPiSSA**: Finally, someone made it deep dish 🍕
+
 
 ## Citation
 
