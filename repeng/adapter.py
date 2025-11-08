@@ -168,7 +168,7 @@ class AdapterScaler:
             object.__setattr__(lora_A_linear, 'weight', original_weight * coeff)
 
     @staticmethod
-    def scale_svft_params(
+    def scale_ipissa_params(
         module: InnerPiSSALayer,
         adapter_name: str,
         coeff: float,
@@ -177,18 +177,18 @@ class AdapterScaler:
         """Scale SVFT adapter alpha (steering coefficient) for reversible steering.
         
         SVFT uses alpha to scale rotations in get_adapted_output.
-        We replace svft_alpha dict entry to make alpha scale with coeff.
+        We replace ipissa_alpha dict entry to make alpha scale with coeff.
         
-        Unlike learnable params, svft_alpha is a config dict (plain dict, not ParameterDict),
+        Unlike learnable params, ipissa_alpha is a config dict (plain dict, not ParameterDict),
         so we scale the stored float value directly.
         """
-        if hasattr(module, 'svft_alpha') and adapter_name in module.ipissa_alpha:
+        if hasattr(module, 'ipissa_alpha') and adapter_name in module.ipissa_alpha:
             # Store original dict
-            originals.append((module, 'svft_alpha', module.ipissa_alpha))
+            originals.append((module, 'ipissa_alpha', module.ipissa_alpha))
             
             # Replace with new dict containing scaled alpha values
-            # svft_alpha is a plain dict {adapter_name: float}, not ParameterDict
-            object.__setattr__(module, 'svft_alpha', {
+            # ipissa_alpha is a plain dict {adapter_name: float}, not ParameterDict
+            object.__setattr__(module, 'ipissa_alpha', {
                 k: coeff if k == adapter_name else v
                 for k, v in module.ipissa_alpha.items()
             })
@@ -238,7 +238,7 @@ def ScaleAdapter(
     try:
         for name, module in model.named_modules():
             if isinstance(module, InnerPiSSALayer) and adapter_name in module.active_adapters:
-                AdapterScaler.scale_svft_params(module=module, adapter_name=adapter_name, coeff=coeff, originals=originals)
+                AdapterScaler.scale_ipissa_params(module=module, adapter_name=adapter_name, coeff=coeff, originals=originals)
             if isinstance(module, IA3Layer) and adapter_name in module.active_adapters:
                 AdapterScaler.scale_ia3_params(module=module, adapter_name=adapter_name, coeff=coeff, originals=originals)
             elif isinstance(module, VeraLayer) and adapter_name in module.vera_lambda_b:

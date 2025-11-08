@@ -849,7 +849,7 @@ for layer in model.intervention_layers:  # Apply adapters to these
     λ = init_small_random(r)  # Non-zero to break symmetry
 
 # Compute steering direction in S-space of measurement layer
-U_measure = model.layers[-2].svft_u
+U_measure = model.layers[-2].ipissa_u
 h_ref = model.base(calibration_data)
 h_cho_S = h_ref[::2] @ U_measure  # Project to S-space
 h_rej_S = h_ref[1::2] @ U_measure

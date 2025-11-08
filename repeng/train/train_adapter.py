@@ -77,8 +77,8 @@ class TrainingConfig:
     # Adapter params
     rank: int = 64
     scale_s: Literal["add", "mult", "none"] = "mult"
-    svft_rotate_u: bool = True
-    svft_rotate_v: bool = True
+    ipissa_rotate_u: bool = True
+    ipissa_rotate_v: bool = True
     full_loss_u: bool = True
 
     # Dataset
@@ -129,12 +129,12 @@ def register_ipissa_peft():
     from peft.utils import register_peft_method
 
     class PeftType2(str, enum.Enum):
-        InnerPiSSA = "InnerPiSSA"
+        INNERPISSA = "INNERPISSA"
 
     peft.utils.peft_types.PeftType = PeftType2
-    PEFT_TYPE_TO_PREFIX_MAPPING[InnerPiSSAConfig.peft_type] = "InnerPiSSA"
+    PEFT_TYPE_TO_PREFIX_MAPPING[InnerPiSSAConfig.peft_type] = "INNERPISSA"
     register_peft_method(
-        name="ipissa",
+        name="innerpissa",
         model_cls=InnerPiSSAModel,
         config_cls=InnerPiSSAConfig,
         prefix="ipissa_",
@@ -230,8 +230,8 @@ def setup_adapter(base_model, config: TrainingConfig):
     adapter_config = InnerPiSSAConfig(
         r=config.rank,
         scale_s=config.scale_s,
-        rotate_u=config.svft_rotate_u,
-        rotate_v=config.svft_rotate_v,
+        rotate_u=config.ipissa_rotate_u,
+        rotate_v=config.ipissa_rotate_v,
         task_type="CAUSAL_LM",
         target_modules=config.target_modules,
     )
@@ -443,7 +443,7 @@ def train_epoch(
                     Uw_full[lk]
                     if config.full_loss_u
                     else model.get_submodule(lk)
-                    .svft_u[config.dataset_name]
+                    .ipissa_u[config.dataset_name]
                     .to(model.device)
                     .float()
                 )
@@ -895,7 +895,7 @@ def main(config: TrainingConfig):
     # Save results
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     save_folder = (
-        Path(config.output_dir) / f"{config.dataset_name}_contrastive_svft_{ts}"
+        Path(config.output_dir) / f"{config.dataset_name}_contrastive_ipissa_{ts}"
     )
     save_folder.mkdir(parents=True, exist_ok=True)
 

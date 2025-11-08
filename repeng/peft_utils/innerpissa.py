@@ -93,7 +93,7 @@ class InnerPiSSAConfig(PeftConfig):
     )
 
     def __post_init__(self):
-        self.peft_type = 'InnerPiSSA'
+        self.peft_type = 'INNERPISSA'
         if self.target_modules is None:
             self.target_modules = ["q_proj", "v_proj"]
 
@@ -108,10 +108,10 @@ class InnerPiSSALayer(BaseTunerLayer):
     - W_res: Residual matrix (frozen)
     """
 
-    adapter_layer_names = ("svft_delta_s", "svft_loglambda_s", "svft_rotation_params_u", "svft_rotation_params_v")
-    other_param_names = ("svft_u", "svft_v", "svft_s", "svft_w_res", "svft_scale_s", "svft_alpha", "svft_r", "svft_rotate_u", "svft_rotate_v", "svft_rotation_method", "svft_block_size")
+    adapter_layer_names = ("ipissa_delta_s", "ipissa_loglambda_s", "ipissa_rotation_params_u", "ipissa_rotation_params_v")
+    other_param_names = ("ipissa_u", "ipissa_v", "ipissa_s", "ipissa_w_res", "ipissa_scale_s", "ipissa_alpha", "ipissa_r", "ipissa_rotate_u", "ipissa_rotate_v", "ipissa_rotation_method", "ipissa_block_size")
 
-    peft_type = "InnerPiSSA"
+    peft_type = "INNERPISSA"
 
     def __init__(self, base_layer: nn.Module, **kwargs) -> None:
         self.base_layer = base_layer
@@ -123,7 +123,7 @@ class InnerPiSSALayer(BaseTunerLayer):
         self.ipissa_block_size = {}
         self.ipissa_scale_s = {}
         self.ipissa_alpha = {}
-        # self.svft_steer_s = {}
+        # self.ipissa_steer_s = {}
         
         # SVD components (per adapter) - simplified naming like SVDSteering
         self.ipissa_u = BufferDict({})  # U: [d_out, r]
@@ -173,7 +173,7 @@ class InnerPiSSALayer(BaseTunerLayer):
         self.ipissa_rotate_v[adapter_name] = rotate_v
         self.ipissa_rotation_method[adapter_name] = rotation_method
         self.ipissa_block_size[adapter_name] = block_size
-        # self.svft_steer_s[adapter_name] = steer_s
+        # self.ipissa_steer_s[adapter_name] = steer_s
 
         # Get base weight
         base_weight = self.get_base_layer().weight
@@ -311,7 +311,7 @@ class InnerPiSSALayer(BaseTunerLayer):
         Note: alpha scales rotations only (steering strength), not S
         """
         alpha = self.ipissa_alpha[adapter]
-        # steer_s = self.svft_steer_s[adapter]
+        # steer_s = self.ipissa_steer_s[adapter]
         
         # Get frozen bases
         U = self.ipissa_u[adapter]  # [d_out, r]
@@ -439,14 +439,14 @@ class InnerPiSSAModel(BaseTuner):
     Bi SVFT Model - handles adapter injection into base model.
     Inherits from BaseTuner to integrate with PEFT infrastructure.
     """
-    prefix: str = "svft_"
+    prefix: str = "ipissa_"
     tuner_layer_cls = InnerPiSSALayer
     target_module_mapping = TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING
 
 
     def _create_and_replace(
         self,
-        svft_config: InnerPiSSAConfig,
+        ipissa_config: InnerPiSSAConfig,
         adapter_name,
         target,
         target_name,
@@ -459,16 +459,16 @@ class InnerPiSSAModel(BaseTuner):
 
         # Regexp matching - Find key 
         kwargs = {
-            "r": svft_config.r,
-            "task_type": svft_config.task_type,
-            "target_modules": svft_config.target_modules,
-            "rotate_u": svft_config.rotate_u,
-            "rotate_v": svft_config.rotate_v,
-            "rotation_method": svft_config.rotation_method,
-            "block_size": svft_config.block_size,
-            "scale_s": svft_config.scale_s,
-            "alpha": svft_config.alpha,
-            # "steer_s": svft_config.steer_s,
+            "r": ipissa_config.r,
+            "task_type": ipissa_config.task_type,
+            "target_modules": ipissa_config.target_modules,
+            "rotate_u": ipissa_config.rotate_u,
+            "rotate_v": ipissa_config.rotate_v,
+            "rotation_method": ipissa_config.rotation_method,
+            "block_size": ipissa_config.block_size,
+            "scale_s": ipissa_config.scale_s,
+            "alpha": ipissa_config.alpha,
+            # "steer_s": ipissa_config.steer_s,
             **optional_kwargs,
         }
 
