@@ -53,10 +53,13 @@ from repeng.train.daily_dilemas import (
 )
 from repeng.train.inner_contrastive_loss import contrastive_steering_loss_with_ref
 
+from attr import define
+import cattrs
+
 proj_root = Path(__file__).parent.parent.parent
 
 
-@dataclass
+@define
 class TrainingConfig:
     """Configuration for training contrastive InnerPiSSA adapter."""
 
@@ -795,7 +798,7 @@ def log_example_outputs(model, tokenizer, choice_ids, coeffs, title):
 def main(config: TrainingConfig):
     """Main training pipeline."""
     setup_logging()
-    logger.info(f"Starting training with config:\n{asdict(config)}")
+    logger.info(f"Starting training with config:\n{config}")
 
     if config.quick:
         logger.warning(
@@ -812,7 +815,7 @@ def main(config: TrainingConfig):
     if config.use_wandb and not config.quick:
         import wandb
 
-        wandb_run = wandb.init(project=config.wandb_project, config=asdict(config))
+        wandb_run = wandb.init(project=config.wandb_project, config=cattrs.unstructure(config))
         logger.info(f"W&B run: {wandb_run.get_url()}")
 
     # Register InnerPiSSA
@@ -968,7 +971,7 @@ def main(config: TrainingConfig):
 
     # Save training config
     with open(save_folder / "training_config.json", "w") as f:
-        json.dump(asdict(config), f, indent=4)
+        json.dump(cattrs.unstructure(config), f, indent=4)
 
     # Save training history
     df_hist.to_parquet(save_folder / "training_history.parquet", index=False)

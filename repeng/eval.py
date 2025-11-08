@@ -83,9 +83,11 @@ def extract_log_ratios(out: 'ModelOutput', input_ids, tokenizer, choice_ids, reg
     repeats = out.sequences.shape[0]
     logrs = [[] for _ in range(repeats)]
     for sample_i in range(repeats):
+        assert isinstance(out.logits, tuple), 'Usually out.logits from generate is a tuple of (batch, vocab) * generated_tokens'
+        assert out.sequences.shape[1] > len(out.logits), 'usually logits is only for generated tokens'
         positions = find_token_positions_for_regex(out.sequences[sample_i][N:], tokenizer, regex_pattern=regex_pattern)
-        for i,(a,b) in enumerate(positions):
-            logpr, lc = binary_log_cls(out.logits[b][sample_i][None], choice_ids)
+        for i,(a,token_i) in enumerate(positions):
+            logpr, lc = binary_log_cls(out.logits[token_i][sample_i][None], choice_ids)
             logrs[sample_i].append(logpr.item())
     return logrs
 
