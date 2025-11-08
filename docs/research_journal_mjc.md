@@ -1149,3 +1149,14 @@ rotating U and V (super uncommon)
     - Learnable singular value scaling (add/mult)
     - OFT block-diagonal structure (parameter efficiency for rotations)
     - but it's a symmetric intervention
+
+
+# 2025-11-08 19:49:44
+
+upto
+- [ ] fix output table, it needs to make sense, remove redunant columns, 
+- [/] have nll degradation  (what I just added)
+- prompt baseline nb
+- sft nb
+- lora nb
+- ablation study, go to justfile, make some cli's with everything turned off one at a time

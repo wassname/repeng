@@ -6,16 +6,19 @@ Example usage:
     python nbs/train.py --quick --use_wandb
 """
 
+import enum
 import gc
 import json
 import random
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Optional
-import safetensors
-import pandas as pd
+
 import numpy as np
+import pandas as pd
+import safetensors
 import torch
 import tyro
 from baukit.nethook import TraceDict
@@ -31,27 +34,24 @@ from transformers import (
     DataCollatorWithPadding,
     GenerationConfig,
 )
-import enum
+
 from repeng import ControlVector, make_dataset
 from repeng.adapter import ScaleAdapter
+from repeng.control import steer
 from repeng.eval import extract_log_ratios
 from repeng.extract import _collect_activations_only, read_representations
 from repeng.peft_utils.innerpissa import InnerPiSSAConfig, InnerPiSSAModel
 from repeng.train.daily_dilemas import (
+    compute_coherence_metrics,
+    compute_transfer_summary,
     evaluate_daily_dilemma,
+    format_results_table,
     load_and_process_daily_dilemmas_eval_dataset,
     load_labels,
     process_daily_dilemma_results,
     select_dilemma_by_values,
 )
 from repeng.train.inner_contrastive_loss import contrastive_steering_loss_with_ref
-from repeng.control import steer
-import re
-from repeng.train.daily_dilemas import (
-    compute_coherence_metrics,
-    compute_transfer_summary,
-    format_results_table
-)
 
 proj_root = Path(__file__).parent.parent.parent
 
@@ -98,7 +98,7 @@ class TrainingConfig:
     eval_dataset_max_token_length: int = 128
 
     # Output
-    output_dir: str = "../outputs/adapters"
+    output_dir: Path = proj_root / "outputs/adapters"
     use_wandb: bool = True
     wandb_project: str = "repeng-steering"
     save_checkpoints: bool = False
@@ -122,7 +122,6 @@ def clear_mem():
 
 def register_ipissa_peft():
     """Register custom InnerPiSSA adapter with PEFT."""
-    
 
     import peft.utils.peft_types
     from peft.mapping import PEFT_TYPE_TO_PREFIX_MAPPING
@@ -141,7 +140,9 @@ def register_ipissa_peft():
     )
 
 
-def load_suffixes(data_dir: Path = proj_root / "nbs/data", max_per_file: Optional[int] = None) -> List[str]:
+def load_suffixes(
+    data_dir: Path = proj_root / "nbs/data", max_per_file: Optional[int] = None
+) -> List[str]:
     """Load dataset suffixes from JSON files."""
     random.seed(42)
     suffix_files = data_dir.glob("*.json")
@@ -161,7 +162,9 @@ def load_suffixes(data_dir: Path = proj_root / "nbs/data", max_per_file: Optiona
 
 def create_dataset(config: TrainingConfig, tokenizer, max_size: Optional[int] = None):
     """Create contrastive dataset."""
-    suffixes = load_suffixes(max_per_file= max_size//4 if max_size is not None else None)
+    suffixes = load_suffixes(
+        max_per_file=max_size // 4 if max_size is not None else None
+    )
 
     honest_dataset = make_dataset(
         "Pretend you're an {persona} person making statements about the world.",
@@ -246,7 +249,6 @@ def setup_adapter(base_model, config: TrainingConfig):
 
 def get_loss_layers(model, config: TrainingConfig):
     """Determine which layers to apply loss to."""
-    
 
     adapter_layers = [
         name for name, param in model.named_parameters() if param.requires_grad
@@ -492,7 +494,8 @@ def train_epoch(
                 len(train_dataloader)
                 * config.n_epochs
                 // config.grad_accum_steps
-                // config.log_n + 1
+                // config.log_n
+                + 1
             )
             == 0
         ):
@@ -521,7 +524,9 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
     )
 
     if config.eval_max_n_dilemmas is not None:
-        logger.warning(f"Not a full eval, selecting {config.eval_max_n_dilemmas} dilemmas.")
+        logger.warning(
+            f"Not a full eval, selecting {config.eval_max_n_dilemmas} dilemmas."
+        )
     dataset_dd = select_dilemma_by_values(
         dataset_dd, label="truth", top_N=config.eval_max_n_dilemmas
     )
@@ -544,31 +549,48 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
     eval_batch_size = config.eval_batch_size or config.batch_size // 4
 
     # Helper function to sweep coefficients with early stopping
-    def sweep_coefficients(method_name, context_manager_fn, coeff_pairs=[(100, -100), (-15, 15), (5.0, -5.0), (2.0, -2.0), (1.0, -1.0), (0.5, -0.5), (0.1, -0.1), (0.01, -0.01)]):
+    def sweep_coefficients(
+        method_name,
+        context_manager_fn,
+        coeff_pairs=[
+            (100, -100),
+            (-15, 15),
+            (5.0, -5.0),
+            (2.0, -2.0),
+            (1.0, -1.0),
+            (0.5, -0.5),
+            (0.1, -0.1),
+            (0.01, -0.01),
+        ],
+    ):
         """Test coefficient pairs from large to small magnitude until finding max coherent.
-        
+
         Args:
             method_name: Name for logging (e.g., "InnerPiSSA", "PCA")
             context_manager_fn: Function that takes coeff and returns context manager for intervention
             coeff_pairs: List of (pos, neg) coefficient pairs to test, ordered large to small
-            
+
         Returns:
             List of result dicts
         """
         results = []
-        
+
         # Baseline
         logger.info(f"Evaluating {method_name} coeff=0 (baseline)")
         clear_mem()
         with context_manager_fn(0):
             d = evaluate_daily_dilemma(
-                model, dataset_dd_pt, tokenizer, choice_ids,
-                batch_size=eval_batch_size, generation_config=generation_config,
+                model,
+                dataset_dd_pt,
+                tokenizer,
+                choice_ids,
+                batch_size=eval_batch_size,
+                generation_config=generation_config,
             )
             d["coeff"] = 0
             d["method"] = method_name
             results.append(d)
-        
+
         # Test pairs from large to small
         for pos_coeff, neg_coeff in coeff_pairs:
             pair_success = True
@@ -578,8 +600,12 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
                     clear_mem()
                     with context_manager_fn(coeff):
                         d = evaluate_daily_dilemma(
-                            model, dataset_dd_pt, tokenizer, choice_ids,
-                            batch_size=eval_batch_size, generation_config=generation_config,
+                            model,
+                            dataset_dd_pt,
+                            tokenizer,
+                            choice_ids,
+                            batch_size=eval_batch_size,
+                            generation_config=generation_config,
                             raise_on_nan=True,
                         )
                         d["coeff"] = coeff
@@ -589,28 +615,29 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
                     logger.info(f"{method_name} broke at coeff={coeff}: {e}")
                     pair_success = False
                     break
-            
+
             if pair_success:
                 logger.info(f"{method_name} coherent at ±{pos_coeff}, stopping search")
                 break
-        
+
         return results
-    
+
     # Evaluate all methods
     df_res = []
-    
+
     # InnerPiSSA adapter
-    df_res.extend(sweep_coefficients(
-        "InnerPiSSA (ours)",
-        lambda c: ScaleAdapter(model, coeff=c)
-    ))
-    
+    df_res.extend(
+        sweep_coefficients("InnerPiSSA (ours)", lambda c: ScaleAdapter(model, coeff=c))
+    )
+
     # PCA baseline
-    df_res.extend(sweep_coefficients(
-        "PCA (baseline)",
-        lambda c: steer(model, dirs_pca, coeff=c, retain_grad=False)
-    ))
-    
+    df_res.extend(
+        sweep_coefficients(
+            "PCA (baseline)",
+            lambda c: steer(model, dirs_pca, coeff=c, retain_grad=False),
+        )
+    )
+
     # Random baseline
     logger.info("Preparing random steering baseline")
     dirs_random = ControlVector(
@@ -618,28 +645,31 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
         directions={k: torch.randn_like(v) for k, v in dirs_pca.directions.items()},
     )
     for k in dirs_random.directions:
-        dirs_random.directions[k] = dirs_random.directions[k] / dirs_random.directions[k].norm()
-    
-    df_res.extend(sweep_coefficients(
-        "random",
-        lambda c: steer(model, dirs_random, coeff=c, retain_grad=False)
-    ))
+        dirs_random.directions[k] = (
+            dirs_random.directions[k] / dirs_random.directions[k].norm()
+        )
+
+    df_res.extend(
+        sweep_coefficients(
+            "random", lambda c: steer(model, dirs_random, coeff=c, retain_grad=False)
+        )
+    )
 
     df_res2 = pd.concat(df_res)
     res = process_daily_dilemma_results(df_res2, dataset_dd, df_labels)[0]
 
     cols_labels = [c for c in res.columns if c.startswith("score_")]
     df_res_pv = res.groupby(["method", "coeff"])[cols_labels].mean().T
-    df_res_pv.index = [s.lstrip('score_') for s in df_res_pv.index]
+    df_res_pv.index = [s.lstrip("score_") for s in df_res_pv.index]
 
     # reorder so truthfulness at top, then all ones starting with Virtue/ then MFT, then Emotion
     df_res_pv = df_res_pv.reindex(
         sorted(
             df_res_pv.index,
             key=lambda x: (
-                not x.startswith('Virtue/Truthfulness'),
-                not x.startswith('Virtue/'),
-                not x.startswith('MFT/'),
+                not x.startswith("Virtue/Truthfulness"),
+                not x.startswith("Virtue/"),
+                not x.startswith("MFT/"),
                 x,
             ),
         ),
@@ -647,10 +677,15 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
     )
 
     logger.info(f"Evaluation results:\n{df_res_pv.round(4)}")
-    
+
     # Generate comprehensive metrics (both text and markdown)
-    logger.info("\n" + format_results_table(res, target_col='score_Virtue/Truthfulness', format='markdown'))
-    
+    logger.info(
+        "\n"
+        + format_results_table(
+            res, target_col="score_Virtue/Truthfulness", format="markdown"
+        )
+    )
+
     # Legacy correlation metrics
     for n, g in res.groupby("method"):
         corr_truth = g[["coeff", "score_Virtue/Truthfulness"]].corr().iloc[0, 1]
@@ -664,7 +699,7 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
 
 def save_adapter(model: PeftModel, save_folder: Path, adapter_name: str):
     """Save adapter weights and config."""
-    
+
     from peft.mapping import PEFT_TYPE_TO_PREFIX_MAPPING
 
     save_folder.mkdir(parents=True, exist_ok=True)
@@ -690,16 +725,18 @@ def save_adapter(model: PeftModel, save_folder: Path, adapter_name: str):
     logger.info(f"Saved adapter to {save_folder}")
 
 
-def generate_example_outputs(model, tokenizer, choice_ids, coeffs=[-1, 0, 1], max_new_tokens=32):
+def generate_example_outputs(
+    model, tokenizer, choice_ids, coeffs=[-1, 0, 1], max_new_tokens=32
+):
     """Generate example outputs at different steering coefficients to show training progress.
-    
+
     Args:
         model: PeftModel with adapter
         tokenizer: Tokenizer
         choice_ids: Token IDs for binary choices (Yes/No)
         coeffs: List of coefficients to test
         max_new_tokens: Max tokens to generate
-        
+
     Returns:
         List of (coeff, text, score) tuples
     """
@@ -708,22 +745,22 @@ def generate_example_outputs(model, tokenizer, choice_ids, coeffs=[-1, 0, 1], ma
 
 Situation: You found a wallet with $500 cash and an ID. Returning it would cost you time and effort, but keeping it would be dishonest.
 Action: Keep the money"""
-    
+
     inputs = tokenizer(example_prompt, return_tensors="pt").to(model.device)
-    val_input_ids = inputs['input_ids']
-    
+    val_input_ids = inputs["input_ids"]
+
     generation_config = GenerationConfig(
         do_sample=False,
         temperature=None,
         top_p=None,
     )
-    
+
     regex_pattern = r"choice: (Yes|No)"
     results = []
-    
+
     for coeff in coeffs:
         with ScaleAdapter(model, coeff=coeff):
-            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 out = model.generate(
                     val_input_ids,
                     generation_config=generation_config,
@@ -732,25 +769,27 @@ Action: Keep the money"""
                     output_logits=True,
                     return_dict_in_generate=True,
                 )
-        
-        logratios = extract_log_ratios(out, val_input_ids, tokenizer, choice_ids, regex_pattern=regex_pattern)
+
+        logratios = extract_log_ratios(
+            out, val_input_ids, tokenizer, choice_ids, regex_pattern=regex_pattern
+        )
         N = val_input_ids.shape[1]
         s = tokenizer.decode(out.sequences[0][N:], skip_special_tokens=False)
         score = np.mean(logratios[0]) if len(logratios[0]) > 0 else np.nan
         results.append((coeff, s, score))
-    
+
     return results
 
 
 def log_example_outputs(model, tokenizer, choice_ids, coeffs, title):
     """Helper to generate and log example outputs."""
-    logger.info("\n" + "="*90)
+    logger.info("\n" + "=" * 90)
     logger.info(title)
-    logger.info("="*90)
+    logger.info("=" * 90)
     examples = generate_example_outputs(model, tokenizer, choice_ids, coeffs=coeffs)
     for coeff, text, score in examples:
         logger.info(f"coeff={coeff:+.1f} | score={score:+.3f} | {text}")
-    logger.info("="*90 + "\n")
+    logger.info("=" * 90 + "\n")
 
 
 def main(config: TrainingConfig):
@@ -758,15 +797,15 @@ def main(config: TrainingConfig):
     setup_logging()
     logger.info(f"Starting training with config:\n{asdict(config)}")
 
-
     if config.quick:
-        logger.warning("Running in QUICK mode: small ds, high lr, few epochs, small eval.")
-        config.lr = 3e-3
-        config.n_epochs = 3
+        logger.warning(
+            "Running in QUICK mode: small ds, high lr, few epochs, small eval."
+        )
+        # config.lr = 5e-3
+        config.n_epochs = 2
         config.grad_accum_steps = 1
         # config.dataset_max_samples = config.batch_size * 8
         config.eval_max_n_dilemmas = 32
-
 
     # Setup W&B if requested
     wandb_run = None
@@ -776,7 +815,6 @@ def main(config: TrainingConfig):
         wandb_run = wandb.init(project=config.wandb_project, config=asdict(config))
         logger.info(f"W&B run: {wandb_run.get_url()}")
 
-
     # Register InnerPiSSA
     register_ipissa_peft()
 
@@ -785,13 +823,14 @@ def main(config: TrainingConfig):
     if tokenizer.pad_token is None:
         tokenizer.pad_token_id = 0
     tokenizer.padding_side = "left"
-    
+
     # Get choice IDs for evaluation
     choice_ids = get_choice_ids(tokenizer)
 
     # Create dataset
-    honest_dataset, dataset_pt = create_dataset(config, tokenizer, max_size=config.dataset_max_samples)
-
+    honest_dataset, dataset_pt = create_dataset(
+        config, tokenizer, max_size=config.dataset_max_samples
+    )
 
     # Load model and adapter
     base_model = load_model(config)
@@ -831,8 +870,13 @@ def main(config: TrainingConfig):
     logger.info(f"Training: {config.n_epochs} epochs, {total_steps} steps")
 
     # Show examples before training
-    log_example_outputs(model, tokenizer, choice_ids, [-2, 0, 2], 
-                       "BEFORE TRAINING - Example outputs at different steering coefficients:")
+    log_example_outputs(
+        model,
+        tokenizer,
+        choice_ids,
+        [-2, 0, 2],
+        "BEFORE TRAINING - Example outputs at different steering coefficients:",
+    )
 
     # Training loop
     infos = []
@@ -850,44 +894,65 @@ def main(config: TrainingConfig):
             infos,
             wandb_run,
         )
-        
+
         # Show examples mid-training
         if epoch == config.n_epochs // 2:
-            log_example_outputs(model, tokenizer, choice_ids, [-2, 0, 2],
-                               f"MID-TRAINING (epoch {epoch}) - Example outputs:")
+            log_example_outputs(
+                model,
+                tokenizer,
+                choice_ids,
+                [-2, 0, 2],
+                f"MID-TRAINING (epoch {epoch}) - Example outputs:",
+            )
 
     # Process final results
     df_hist = process_infos(infos)
     logger.info(f"Training complete. Final loss: {df_hist['loss_total'].iloc[-1]:.4f}")
-    
+
     # Show examples after training
-    log_example_outputs(model, tokenizer, choice_ids, [-2, -1, 0, 1, 2],
-                       "AFTER TRAINING - Example outputs at different steering coefficients:")
+    log_example_outputs(
+        model,
+        tokenizer,
+        choice_ids,
+        [-2, -1, 0, 1, 2],
+        "AFTER TRAINING - Example outputs at different steering coefficients:",
+    )
 
     # Calibrate sign: Check if positive coeff makes example more honest
     # The example asks "should you keep found money?" - honest answer is "No" (return it)
     # So we want positive coeff to DECREASE logratio (decrease P(Yes))
     logger.info("Calibrating adapter sign based on example output...")
-    examples = generate_example_outputs(model, tokenizer, choice_ids, coeffs=[0, 1], max_new_tokens=16)
+    examples = generate_example_outputs(
+        model, tokenizer, choice_ids, coeffs=[0, 1], max_new_tokens=16
+    )
     score_baseline = examples[0][2]  # coeff=0
     score_pos = examples[1][2]  # coeff=1
-    
+
     # For honesty prompt "should you keep money?", honest = No = negative logratio
     # So we want coeff=+1 to DECREASE logratio (make more honest)
     expected_direction = -1  # Positive coeff should decrease logratio
     actual_direction = np.sign(score_pos - score_baseline)
-    
+
     if not np.isnan(actual_direction) and actual_direction != expected_direction:
-        logger.warning(f"Adapter sign is INVERTED! Expected Δscore<0, got Δscore={score_pos - score_baseline:.3f}")
+        logger.warning(
+            f"Adapter sign is INVERTED! Expected Δscore<0, got Δscore={score_pos - score_baseline:.3f}"
+        )
         logger.info("Flipping all adapter parameters...")
         for name, param in model.named_parameters():
-            if 'ipissa_' in name.lower() and param.requires_grad:
+            if "ipissa_" in name.lower() and param.requires_grad:
                 param.data *= -1
         logger.info("Re-testing after sign flip:")
-        log_example_outputs(model, tokenizer, choice_ids, [-2, -1, 0, 1, 2],
-                           "AFTER SIGN CALIBRATION - Example outputs:")
+        log_example_outputs(
+            model,
+            tokenizer,
+            choice_ids,
+            [-2, -1, 0, 1, 2],
+            "AFTER SIGN CALIBRATION - Example outputs:",
+        )
     else:
-        logger.info(f"Adapter sign is correct (Δscore={score_pos - score_baseline:.3f}, expected <0)")
+        logger.info(
+            f"Adapter sign is correct (Δscore={score_pos - score_baseline:.3f}, expected <0)"
+        )
 
     # Evaluation
     res, df_res_pv = evaluate_model(model, tokenizer, config, dirs_pca)
@@ -911,11 +976,15 @@ def main(config: TrainingConfig):
     # Save evaluation results
     res.to_parquet(save_folder / "eval_results.parquet", index=False)
     df_res_pv.to_parquet(save_folder / "eval_summary.parquet")
-    
+
     # Save markdown results table
-    from repeng.train.daily_dilemas import format_results_table
+
     with open(save_folder / "eval_summary.md", "w") as f:
-        f.write(format_results_table(res, target_col='score_Virtue/Truthfulness', format='markdown'))
+        f.write(
+            format_results_table(
+                res, target_col="score_Virtue/Truthfulness", format="markdown"
+            )
+        )
 
     logger.success(f"All results saved to {save_folder}")
 
