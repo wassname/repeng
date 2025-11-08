@@ -1140,7 +1140,7 @@ in SVD space (uncommon)
 rotating U and V (super uncommon)
 
 
-    Configuration for Bi SVFT adapter with SVDSteering rotations.
+    Configuration for InnerPiSSA adapter with SVDSteering rotations.
     
     SVD-based steering with PiSSA decomposition: W = U @ S @ V^T + W_res
     - Top-r SVD components (U, S, V) for principal directions

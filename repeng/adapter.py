@@ -174,9 +174,9 @@ class AdapterScaler:
         coeff: float,
         originals: List[Tuple]
     ) -> None:
-        """Scale SVFT adapter alpha (steering coefficient) for reversible steering.
+        """Scale InnerPiSSA adapter alpha (steering coefficient) for reversible steering.
         
-        SVFT uses alpha to scale rotations in get_adapted_output.
+        InnerPiSSA uses alpha to scale rotations in get_adapted_output.
         We replace ipissa_alpha dict entry to make alpha scale with coeff.
         
         Unlike learnable params, ipissa_alpha is a config dict (plain dict, not ParameterDict),

@@ -29,16 +29,16 @@ TODO
 uv sync --all-groups
 
 # help
-uv run python nbs/train_svft.py --help
+uv run python nbs/train.py --help
 
 # Quick test run
-uv run python nbs/train_svft.py --quick
+uv run python nbs/train.py --quick
 
 # Full training with W&B
-uv run python nbs/train_svft.py --batch_size 14 --n_epochs 30 --use_wandb
+uv run python nbs/train.py --batch_size 14 --n_epochs 30 --use_wandb
 
 # Custom config
-uv run python nbs/train_svft.py \
+uv run python nbs/train.py \
   --rank 128 \
   --lr 5e-4 \
   --target_modules ".*\.(10|20|30)\..*(gate_proj|down_proj)"

@@ -1,5 +1,5 @@
 """
-Bi SVFT adapter - combines SVFT (Singular Value Fine-Tuning) with changes
+InnerPiSSA adapter - combines SVFT (Singular Value Fine-Tuning) with changes
 
 SVFT decomposes weights via SVD: W = U @ S @ V^T
 - U, V are frozen singular vectors (orthonormal bases)
@@ -41,7 +41,7 @@ from peft.utils import (
 @dataclass
 class InnerPiSSAConfig(PeftConfig):
     """
-    Configuration for Bi SVFT adapter with SVDSteering rotations.
+    Configuration for InnerPiSSA adapter with SVDSteering rotations.
     
     SVD-based steering with PiSSA decomposition: W = U @ S @ V^T + W_res
     - Top-r SVD components (U, S, V) for principal directions
@@ -51,7 +51,7 @@ class InnerPiSSAConfig(PeftConfig):
     - OFT block-diagonal structure (parameter efficiency for rotations)
     - but it's a symmetric intervention
     """
-    # SVFT-specific parameters
+    # InnerPiSSA-specific parameters
     r: int = field(default=16, metadata={"help": "SVD rank for principal components"})
     rotate_u: bool = field(
         default=False,
@@ -100,7 +100,7 @@ class InnerPiSSAConfig(PeftConfig):
 
 class InnerPiSSALayer(BaseTunerLayer):
     """
-    Bi SVFT layer with SVDSteering-style decomposition.
+    InnerPiSSA layer with SVDSteering-style decomposition.
     
     W = U @ S @ V^T + W_res where:
     - U, V: Top-r singular vectors (can be rotated)
@@ -161,7 +161,7 @@ class InnerPiSSALayer(BaseTunerLayer):
         **kwargs
     ) -> None:
         """
-        Initialize SVFT adapter with simple top-r SVD + residual (PiSSA-style).
+        Initialize adapter with simple top-r SVD + residual (PiSSA-style).
         """
         if adapter_name in self.ipissa_u:
             return  # Already initialized
@@ -369,7 +369,7 @@ class InnerPiSSALayer(BaseTunerLayer):
     def forward(self, x: Float[Tensor, '...'], *args: Any, **kwargs: Any) -> Float[Tensor, '...']:
         previous_dtype = x.dtype
         
-        assert len(self.active_adapters) <= 1, "Bi SVFT currently supports only one active adapter at a time."
+        assert len(self.active_adapters) <= 1, "InnerPiSSA currently supports only one active adapter at a time."
 
         if self.disable_adapters:
             if self.merged:
@@ -401,10 +401,10 @@ class InnerPiSSALayer(BaseTunerLayer):
         return result
 
     def merge(self, safe_merge: bool = False, adapter_names: Optional[list[str]] = None) -> None:
-        raise NotImplementedError("Merge not implemented for Bi SVFT yet")
+        raise NotImplementedError("Merge not implemented for InnerPiSSA yet")
 
     def unmerge(self) -> None:
-        raise NotImplementedError("Unmerge not implemented for Bi SVFT yet")
+        raise NotImplementedError("Unmerge not implemented for InnerPiSSA yet")
 
     def __repr__(self) -> str:
         rep = super().__repr__()
@@ -412,7 +412,7 @@ class InnerPiSSALayer(BaseTunerLayer):
 
 
 class InnerPiSSALinear(nn.Module, InnerPiSSALayer):
-    """Bi SVFT implemented in a dense layer"""
+    """InnerPiSSA implemented in a dense layer"""
     
     def __init__(
         self,
@@ -426,7 +426,6 @@ class InnerPiSSALinear(nn.Module, InnerPiSSALayer):
         self.update_layer(adapter_name, **kwargs)
 
     def forward(self, hidden_states: Float[Tensor, '...'], *args: Any, **kwargs: Any) -> Float[Tensor, '...']:
-        """Forward pass - delegates to BISvftLayer.forward"""
         return InnerPiSSALayer.forward(self, hidden_states, *args, **kwargs)
 
     def __repr__(self) -> str:
@@ -436,7 +435,7 @@ class InnerPiSSALinear(nn.Module, InnerPiSSALayer):
 
 class InnerPiSSAModel(BaseTuner):
     """
-    Bi SVFT Model - handles adapter injection into base model.
+    InnerPiSSA Model - handles adapter injection into base model.
     Inherits from BaseTuner to integrate with PEFT infrastructure.
     """
     prefix: str = "ipissa_"
@@ -483,7 +482,7 @@ class InnerPiSSAModel(BaseTuner):
     
     @staticmethod
     def _create_new_module(adapter_name, target, **kwargs):
-        """Create BiSvftLinear for Linear layers."""
+        """Create InnerPiSSALinear for Linear layers."""
         if isinstance(target, BaseTunerLayer):
             target_base_layer = target.get_base_layer()
         else:
@@ -497,7 +496,7 @@ class InnerPiSSAModel(BaseTuner):
             )
         else:
             raise ValueError(
-                f"Target module {target} is not supported for Bi SVFT. "
+                f"Target module {target} is not supported for InnerPiSSA. "
                 f"Currently, only `torch.nn.Linear` is supported."
             )
         return new_module

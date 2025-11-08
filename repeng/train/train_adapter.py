@@ -2,8 +2,8 @@
 """Train contrastive InnerPiSSA adapter for steering LLMs.
 
 Example usage:
-    python nbs/train_svft.py --batch_size 14 --n_epochs 30
-    python nbs/train_svft.py --quick --use_wandb
+    python nbs/train.py --batch_size 14 --n_epochs 30
+    python nbs/train.py --quick --use_wandb
 """
 
 import gc
@@ -881,7 +881,7 @@ def main(config: TrainingConfig):
         logger.warning(f"Adapter sign is INVERTED! Expected Δscore<0, got Δscore={score_pos - score_baseline:.3f}")
         logger.info("Flipping all adapter parameters...")
         for name, param in model.named_parameters():
-            if 'svft' in name.lower() and param.requires_grad:
+            if 'ipissa_' in name.lower() and param.requires_grad:
                 param.data *= -1
         logger.info("Re-testing after sign flip:")
         log_example_outputs(model, tokenizer, choice_ids, [-2, -1, 0, 1, 2],
