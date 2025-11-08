@@ -8,16 +8,16 @@ running
 uv sync --all-groups
 
 # help
-uv python -m repeng.train.train_svft --help
+uv python nbs/train_svft.py --help
 
 # Quick test run
-uv python -m repeng.train.train_svft --quick
+uv python nbs/train_svft.py --quick
 
 # Full training with W&B
-uv python -m repeng.train.train_svft --batch_size 14 --n_epochs 30 --use_wandb
+uv python nbs/train_svft.py --batch_size 14 --n_epochs 30 --use_wandb
 
 # Custom config
-uv python -m repeng.train.train_svft \
+uv python nbs/train_svft.py \
   --rank 128 \
   --lr 5e-4 \
   --target_modules ".*\.(10|20|30)\..*(gate_proj|down_proj)"
@@ -27,7 +27,7 @@ uv python -m repeng.train.train_svft \
 # psudo code for contrastive SVD adapter steering
 
 ```py
-# DATA: Contrastive pairs differing in 1-6 tokens
+# DATA: Contrastive prompt pairs differing by one word. Incomplete, but have hidden states that would lead to different continuations.
 honest    = ["I love cheese; let me tell you about the andes mountains", ...]
 dishonest = ["I hate cheese; let me tell you about the andes mountains", ...]
 batch = [honest[0], dishonest[0], honest[1], dishonest[1], ...]

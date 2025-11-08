@@ -2,8 +2,8 @@
 """Train contrastive SVFT adapter for steering LLMs.
 
 Example usage:
-    python -m repeng.train.train_svft --batch_size 14 --n_epochs 30
-    python -m repeng.train.train_svft --quick --use_wandb
+    python nbs/train_svft.py --batch_size 14 --n_epochs 30
+    python nbs/train_svft.py --quick --use_wandb
 """
 
 import gc
@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Optional
-
+import safetensors
 import pandas as pd
 import torch
 import tyro
@@ -30,7 +30,7 @@ from transformers import (
     DataCollatorWithPadding,
     GenerationConfig,
 )
-
+import enum
 from repeng import ControlVector, make_dataset
 from repeng.adapter import ScaleAdapter
 from repeng.extract import _collect_activations_only, read_representations
@@ -43,6 +43,8 @@ from repeng.train.daily_dilemas import (
     select_dilemma_by_values,
 )
 from repeng.train.inner_contrastive_loss import contrastive_steering_loss_with_ref
+from repeng.control import steer
+import re
 
 proj_root = Path(__file__).parent.parent.parent
 
@@ -111,7 +113,7 @@ def clear_mem():
 
 def register_svft_peft():
     """Register custom SVFT adapter with PEFT."""
-    import enum
+    
 
     import peft.utils.peft_types
     from peft.mapping import PEFT_TYPE_TO_PREFIX_MAPPING
@@ -130,7 +132,7 @@ def register_svft_peft():
     )
 
 
-def load_suffixes(data_dir: Path = proj_root / "notebooks/data") -> List[str]:
+def load_suffixes(data_dir: Path = proj_root / "nbs/data") -> List[str]:
     """Load dataset suffixes from JSON files."""
     random.seed(42)
     suffix_files = data_dir.glob("*.json")
@@ -140,7 +142,7 @@ def load_suffixes(data_dir: Path = proj_root / "notebooks/data") -> List[str]:
         with open(sf) as f:
             f_suffixes = json.load(f)
             random.shuffle(f_suffixes)
-            suffixes += f_suffixes[:128]
+            suffixes += f_suffixes[:256]
 
     logger.info(f"Loaded {len(suffixes)} suffixes from {data_dir}")
     return suffixes
@@ -166,8 +168,8 @@ def create_dataset(config: TrainingConfig, tokenizer):
     dataset = Dataset.from_list(data)
 
     if config.quick:
-        dataset = dataset.select(range(256))
-        honest_dataset = honest_dataset[:256]
+        dataset = dataset.select(range(32))
+        honest_dataset = honest_dataset[:32]
 
     logger.info(
         f"Dataset: {len(dataset)} examples, {len(honest_dataset)} contrastive pairs"
@@ -232,7 +234,7 @@ def setup_adapter(base_model, config: TrainingConfig):
 
 def get_loss_layers(model, config: TrainingConfig):
     """Determine which layers to apply loss to."""
-    import re
+    
 
     adapter_layers = [
         name for name, param in model.named_parameters() if param.requires_grad
@@ -542,7 +544,7 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
             df_res.append(d)
 
     # Also eval PCA baseline
-    from repeng.control import steer
+    
 
     for coeff in [-1.0, 0.0, 1.0]:
         logger.info(f"Evaluating PCA baseline coeff={coeff}")
@@ -581,7 +583,7 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
 
 def save_adapter(model: PeftModel, save_folder: Path, adapter_name: str):
     """Save adapter weights and config."""
-    import safetensors
+    
     from peft.mapping import PEFT_TYPE_TO_PREFIX_MAPPING
 
     save_folder.mkdir(parents=True, exist_ok=True)
@@ -614,7 +616,7 @@ def main(config: TrainingConfig):
 
     # Setup W&B if requested
     wandb_run = None
-    if config.use_wandb:
+    if config.use_wandb and not config.quick:
         import wandb
 
         wandb_run = wandb.init(project=config.wandb_project, config=asdict(config))

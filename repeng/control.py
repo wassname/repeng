@@ -222,9 +222,9 @@ def baukit_dir_add_hook(
     - Linear scaling: coeff=0 (no steering), coeff=1 (baseline), coeff=2 (double)
     """
     if isinstance(output, tuple):
-        modified = output[0]
+        y = output[0]
     else:
-        modified = output
+        y = output
     direction = directions[layer]  # (k, d)
     
     # Sum k directions to single vector (simple linear combination)
@@ -233,13 +233,15 @@ def baukit_dir_add_hook(
     else:
         delta = direction  # Already (d,) for k=1
     
+    delta = delta.to(y.dtype).to(y.device)
+    
     # Linear additive scaling
-    modified = modified + coeff * delta
+    y = y + coeff * delta
     
     if isinstance(output, tuple):
-        output = (modified,) + output[1:]
+        output = (y,) + output[1:]
     else:
-        output = modified
+        output = y
     return output
 
 

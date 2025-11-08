@@ -987,3 +987,11 @@ let me try with rotate_v=False and u... oh it drifts even with only S... curious
 what about only additive s?
 
 and what about rotate_v?
+
+
+# 2025-11-08 12:30:06
+
+I seems to be working! Now
+- ablate
+- benchmark
+- see how high a lr and low little data
