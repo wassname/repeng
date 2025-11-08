@@ -20,7 +20,7 @@ from peft.tuners.ia3.layer import IA3Layer
 from peft.tuners.vera.layer import VeraLayer
 from peft.tuners.road.layer import RoadLayer
 from peft.tuners.lora.layer import LoraLayer
-from repeng.peft_utils.svft import TRMSvftLayer
+from repeng.peft_utils.bisvft import BiSvftLayer
 
 try:
     from peft.tuners.delora.layer import DeloraLayer
@@ -169,7 +169,7 @@ class AdapterScaler:
 
     @staticmethod
     def scale_svft_params(
-        module: TRMSvftLayer,
+        module: BiSvftLayer,
         adapter_name: str,
         coeff: float,
         originals: List[Tuple]
@@ -237,7 +237,7 @@ def ScaleAdapter(
     
     try:
         for name, module in model.named_modules():
-            if isinstance(module, TRMSvftLayer) and adapter_name in module.active_adapters:
+            if isinstance(module, BiSvftLayer) and adapter_name in module.active_adapters:
                 AdapterScaler.scale_svft_params(module=module, adapter_name=adapter_name, coeff=coeff, originals=originals)
             if isinstance(module, IA3Layer) and adapter_name in module.active_adapters:
                 AdapterScaler.scale_ia3_params(module=module, adapter_name=adapter_name, coeff=coeff, originals=originals)

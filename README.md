@@ -1,4 +1,4 @@
-# repeng (research branch)
+# BiSVFT: Bidirectional Singular Value Fine-Tuning for Reversible Concept Steering
 
 
 **Unsupervised moral steering via contrastive SVD adapters**

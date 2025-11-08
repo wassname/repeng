@@ -1059,3 +1059,73 @@ Training: 200 honesty pairs | Eval: DailyDilemmas (n=48)
 3. SFT oracle - **Optional, shows ceiling**
 
 This is cleaner and more compelling than mixing datasets. The story becomes: "Here's what different methods can extract from the same 200 honesty examples."
+
+
+# 2025-11-08 15:54:39
+
+##  Implemented (in train_svft.py)
+1. **Random baseline** - Done
+2. **PCA baseline** - Done  
+3. **SVD adapter (yours)** - Done
+4. **Expanded coefficient sweep** [-5, -2, -1, -0.5, 0, 0.5, 1, 2, 5] - Done
+5. **Comprehensive metrics** (Transfer Effect, Coherence Range, etc.) - Done
+6. **Example generation during training** - Done
+
+## Still Needed
+
+### 1. **Prompting Baseline** 
+Add "Be honest and truthful" system prompt, evaluate on DailyDilemmas:
+```python
+# In evaluate_model() or separate notebook
+prompt_prefix = "You are an honest and truthful assistant. "
+# Prepend to each dilemma, evaluate with same coefficient sweep logic
+```
+
+**Recommendation**: Add to train_svft.py as another method in the evaluation loop (similar to how PCA/random are added). Won't slow runtime much since it's just one forward pass per coefficient.
+
+### 2. **LoRA Baseline** (Optional - "if time permits")
+- Train rank-8 LoRA on your ~200 honesty pairs
+- Same loss as normal supervised finetuning
+- Evaluate on DailyDilemmas
+- **Different notebook/script** since it's supervised training (not unsupervised steering)
+
+### 3. **SFT Oracle** (Optional - "shows ceiling")
+- Full finetuning on honesty pairs
+- **Separate script** - computationally expensive
+- Establishes upper bound
+
+### 4. **Statistical Significance Testing**
+The table shows `*** p<0.001, ** p<0.01, * p<0.05` - need to add significance tests comparing methods. The `compute_transfer_summary()` function already imports `scipy.stats` but might need bootstrap/permutation tests.
+
+## My Recommendation
+
+**Minimal viable results (do first):**
+1. [x]  Random, PCA, SVD - **Done**
+2. [ ]  **Prompting baseline** - Add to train_svft.py eval (15 min work)
+3. [ ]  **Statistical tests** - Add to `format_results_table()` (30 min work)
+
+**Extended version (if reviewer asks):**
+4. [ ]  **LoRA baseline** - Separate notebook using same eval functions (2-3 hours)
+5. [ ]  **SFT** - Only if needed to show upper bound (several hours)
+
+The core story "unsupervised methods (PCA/SVD) vs prompting on 200 honesty pairs" is compelling without LoRA/SFT. Those are nice-to-have comparisons but not essential.
+
+
+# 2025-11-08 16:33:24 Explaioning
+
+why is our method intervening in the wrong direction? Well the activation space might not have the same directions as the output logprob space. The original steering in repeng has calibration step which we do not have
+
+In other words, Maximizing h_pos - h_neg at layer N-3 doesn't guarantee the OUTPUT goes in the desired direction. Later layers could reverse it.
+
+but in the loss we are training on the seperation in layer N-3... now is the direction in layer N-3 always same as the output? e.g. seperating hs_pos from hs_neg more in the same direction, in singualr value space, compared to the reference model hs... does this make the output go in the direction we expect? no it just get's more of what the base model thought right? in face layer N-2 might even flip it
+
+so in the PCA train there is a calibration phase where they swap the effect if needed. we could do that after train or during or after eval during results anlysis (seems simplest unless you have a nice idea for baking it in)
+
+... added this to the code so t
+
+# 2025-11-08 15:56:55
+
+- [ ] do full run and check results with plan
+- [ ] do prompting baseline notebook
+- [ ] do sft baseline notebook (for ceiling)
+- [ ] do lora baseline notebook (if time)

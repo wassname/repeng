@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train contrastive SVFT adapter for steering LLMs.
+"""Train contrastive BiSVFT adapter for steering LLMs.
 
 Example usage:
     python nbs/train_svft.py --batch_size 14 --n_epochs 30
@@ -36,7 +36,7 @@ from repeng import ControlVector, make_dataset
 from repeng.adapter import ScaleAdapter
 from repeng.eval import extract_log_ratios
 from repeng.extract import _collect_activations_only, read_representations
-from repeng.peft_utils.svft import TRMSvftAConfig, TRMSvftModel
+from repeng.peft_utils.bisvft import BiSvftAConfig, BiSvftModel
 from repeng.train.daily_dilemas import (
     evaluate_daily_dilemma,
     load_and_process_daily_dilemmas_eval_dataset,
@@ -58,7 +58,7 @@ proj_root = Path(__file__).parent.parent.parent
 
 @dataclass
 class TrainingConfig:
-    """Configuration for training contrastive SVFT adapter."""
+    """Configuration for training contrastive BiSVFT adapter."""
 
     # Model config
     model_name: str = "Qwen/Qwen3-4B-Instruct-2507"
@@ -68,7 +68,7 @@ class TrainingConfig:
     # Training params
     batch_size: int = 14
     n_epochs: int = 30
-    lr: float = 1e-3
+    lr: float = 2e-3
     weight_decay: float = 0.01
     log_n: int = 40
     grad_accum_steps: int = 6
@@ -83,8 +83,7 @@ class TrainingConfig:
 
     # Dataset
     dataset_name: str = "honest"
-    dataset_max_samples: Optional[int] = None
-    eval_dataset_max_token_length: int = 128
+    dataset_max_samples: Optional[int] = 200
 
     # Loss
     use_logsigmoid: bool = True
@@ -95,11 +94,12 @@ class TrainingConfig:
     # Eval
     eval_batch_size: Optional[int] = None
     # Instead of a full eval just use the top N value with truth labels
-    eval_dilemmas: Optional[int] = None
+    eval_max_n_dilemmas: Optional[int] = None
+    eval_dataset_max_token_length: int = 128
 
     # Output
     output_dir: str = "../outputs/adapters"
-    use_wandb: bool = False
+    use_wandb: bool = True
     wandb_project: str = "repeng-steering"
     save_checkpoints: bool = False
 
@@ -120,8 +120,8 @@ def clear_mem():
     torch.cuda.empty_cache()
 
 
-def register_svft_peft():
-    """Register custom SVFT adapter with PEFT."""
+def register_bisvft_peft():
+    """Register custom BiSVFT adapter with PEFT."""
     
 
     import peft.utils.peft_types
@@ -129,14 +129,14 @@ def register_svft_peft():
     from peft.utils import register_peft_method
 
     class PeftType2(str, enum.Enum):
-        TRMSVFT = "TRMSVFT"
+        TRMBiSVFT = "TRMBiSVFT"
 
     peft.utils.peft_types.PeftType = PeftType2
-    PEFT_TYPE_TO_PREFIX_MAPPING[TRMSvftAConfig.peft_type] = "svft_"
+    PEFT_TYPE_TO_PREFIX_MAPPING[BiSvftAConfig.peft_type] = "svft_"
     register_peft_method(
         name="trmsvft",
-        model_cls=TRMSvftModel,
-        config_cls=TRMSvftAConfig,
+        model_cls=BiSvftModel,
+        config_cls=BiSvftAConfig,
         prefix="svft_",
     )
 
@@ -226,8 +226,8 @@ def load_model(config: TrainingConfig):
 
 
 def setup_adapter(base_model, config: TrainingConfig):
-    """Setup SVFT adapter on base model."""
-    adapter_config = TRMSvftAConfig(
+    """Setup BiSVFT adapter on base model."""
+    adapter_config = BiSvftAConfig(
         r=config.rank,
         scale_s=config.scale_s,
         rotate_u=config.svft_rotate_u,
@@ -390,7 +390,7 @@ def train_epoch(
     model.train()
 
     for j, batch in enumerate(
-        tqdm(train_dataloader, desc=f"Epoch {epoch}", leave=False)
+        tqdm(train_dataloader, desc=f"Epoch {epoch}", leave=False, unit="batch")
     ):
         step = epoch * len(train_dataloader) + j
         batch = {k: v.to(model.device) for k, v in batch.items()}
@@ -520,10 +520,10 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
         tokenizer, max_size=config.eval_dataset_max_token_length
     )
 
-    if config.eval_dilemmas is not None:
-        logger.warning(f"Not a full eval, selecting {config.eval_dilemmas} dilemmas.")
+    if config.eval_max_n_dilemmas is not None:
+        logger.warning(f"Not a full eval, selecting {config.eval_max_n_dilemmas} dilemmas.")
     dataset_dd = select_dilemma_by_values(
-        dataset_dd, label="truth", top_N=config.eval_dilemmas
+        dataset_dd, label="truth", top_N=config.eval_max_n_dilemmas
     )
     dataset_dd_pt = dataset_dd.select_columns(
         ["dilemma_idx", "idx", "input_ids"]
@@ -543,104 +543,120 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
 
     eval_batch_size = config.eval_batch_size or config.batch_size // 4
 
-    # Expanded coefficient sweep for better evaluation
-    # Note that for result using sweeps, we only need to find the highest abs(coeff) that gives us fully coherent results
-    coeff_sweeps = [[0,], [-5.0, -2.0, -1.0, -0.5], [5.0, 2.0, 1.0, 0.5]]
-    
-    df_res = []
-    for sweep in coeff_sweeps:
-        for coeff in sweep:
-            logger.info(f"Evaluating adapter coeff={coeff}")
-            clear_mem()
-            with ScaleAdapter(model, coeff=coeff):
-                d = evaluate_daily_dilemma(
-                    model,
-                    dataset_dd_pt,
-                    tokenizer,
-                    choice_ids,
-                    batch_size=eval_batch_size,
-                    generation_config=generation_config,
-                )
-                d["coeff"] = coeff
-                d["method"] = "train"
-                df_res.append(d)
-
-                full_result = not d['logratio'].isna().any()
-                if full_result:
+    # Helper function to sweep coefficients with early stopping
+    def sweep_coefficients(method_name, context_manager_fn, coeff_pairs=[(5.0, -5.0), (2.0, -2.0), (1.0, -1.0), (0.5, -0.5)]):
+        """Test coefficient pairs from large to small magnitude until finding max coherent.
+        
+        Args:
+            method_name: Name for logging (e.g., "BiSVFT", "PCA")
+            context_manager_fn: Function that takes coeff and returns context manager for intervention
+            coeff_pairs: List of (pos, neg) coefficient pairs to test, ordered large to small
+            
+        Returns:
+            List of result dicts
+        """
+        results = []
+        
+        # Baseline
+        logger.info(f"Evaluating {method_name} coeff=0 (baseline)")
+        clear_mem()
+        with context_manager_fn(0):
+            d = evaluate_daily_dilemma(
+                model, dataset_dd_pt, tokenizer, choice_ids,
+                batch_size=eval_batch_size, generation_config=generation_config,
+            )
+            d["coeff"] = 0
+            d["method"] = method_name
+            results.append(d)
+        
+        # Test pairs from large to small
+        for pos_coeff, neg_coeff in coeff_pairs:
+            pair_success = True
+            for coeff in [neg_coeff, pos_coeff]:
+                try:
+                    logger.info(f"Evaluating {method_name} coeff={coeff}")
+                    clear_mem()
+                    with context_manager_fn(coeff):
+                        d = evaluate_daily_dilemma(
+                            model, dataset_dd_pt, tokenizer, choice_ids,
+                            batch_size=eval_batch_size, generation_config=generation_config,
+                            raise_on_nan=True,
+                        )
+                        d["coeff"] = coeff
+                        d["method"] = method_name
+                        results.append(d)
+                except ValueError as e:
+                    logger.info(f"{method_name} broke at coeff={coeff}: {e}")
+                    pair_success = False
                     break
-
-    # Also eval PCA baseline
-    for sweep in coeff_sweeps:
-        for coeff in sweep:
-            logger.info(f"Evaluating PCA baseline coeff={coeff}")
-            clear_mem()
-            with steer(model, dirs_pca, coeff=coeff, retain_grad=False):
-                d = evaluate_daily_dilemma(
-                    model,
-                    dataset_dd_pt,
-                    tokenizer,
-                    choice_ids,
-                    batch_size=eval_batch_size,
-                    generation_config=generation_config,
-                )
-                d["coeff"] = coeff
-                d["method"] = "pca"
-                df_res.append(d)
-
-            full_result = not d['logratio'].isna().any()
-            if full_result:
+            
+            if pair_success:
+                logger.info(f"{method_name} coherent at ±{pos_coeff}, stopping search")
                 break
+        
+        return results
     
-    # Add random baseline for comparison
-    logger.info("Evaluating random steering baseline")
+    # Evaluate all methods
+    df_res = []
+    
+    # BiSVFT adapter
+    df_res.extend(sweep_coefficients(
+        "BiSVFT (mine)",
+        lambda c: ScaleAdapter(model, coeff=c)
+    ))
+    
+    # PCA baseline
+    df_res.extend(sweep_coefficients(
+        "pca",
+        lambda c: steer(model, dirs_pca, coeff=c, retain_grad=False)
+    ))
+    
+    # Random baseline
+    logger.info("Preparing random steering baseline")
     dirs_random = ControlVector(
         model_type=model.config.model_type,
         directions={k: torch.randn_like(v) for k, v in dirs_pca.directions.items()},
     )
     for k in dirs_random.directions:
         dirs_random.directions[k] = dirs_random.directions[k] / dirs_random.directions[k].norm()
-
-    for sweep in coeff_sweeps:
-        for coeff in sweep:
-            logger.info(f"Evaluating random baseline coeff={coeff}")
-            clear_mem()
-            with steer(model, dirs_random, coeff=coeff, retain_grad=False):
-                d = evaluate_daily_dilemma(
-                    model,
-                    dataset_dd_pt,
-                    tokenizer,
-                    choice_ids,
-                    batch_size=eval_batch_size,
-                    generation_config=generation_config,
-                )
-                d["coeff"] = coeff
-                d["method"] = "random"
-                df_res.append(d)
-
-            full_result = not d['logratio'].isna().any()
-            if full_result:
-                break
+    
+    df_res.extend(sweep_coefficients(
+        "random",
+        lambda c: steer(model, dirs_random, coeff=c, retain_grad=False)
+    ))
 
     df_res2 = pd.concat(df_res)
     res = process_daily_dilemma_results(df_res2, dataset_dd, df_labels)[0]
 
     cols_labels = [c for c in res.columns if c.startswith("score_")]
     df_res_pv = res.groupby(["method", "coeff"])[cols_labels].mean().T
+    df_res_pv.index = [s.lstrip('score_') for s in df_res_pv.index]
 
-    logger.info(f"Evaluation results:\n{df_res_pv}")
+    # reorder so truthfulness at top, then all ones starting with Virtue/ then MFT, then Emotion
+    df_res_pv = df_res_pv.reindex(
+        sorted(
+            df_res_pv.index,
+            key=lambda x: (
+                not x.startswith('Virtue/Truthfulness'),
+                not x.startswith('Virtue/'),
+                not x.startswith('MFT/'),
+                x,
+            ),
+        ),
+        axis=0,
+    )
 
+    logger.info(f"Evaluation results:\n{df_res_pv.round(4)}")
     
-    # Generate comprehensive metrics
-    logger.info("\n" + "="*90)
-    logger.info(format_results_table(res, target_metric='score_Virtue/Truthfulness'))
-    logger.info("="*90)
+    # Generate comprehensive metrics (both text and markdown)
+    logger.info("\n" + format_results_table(res, target_col='score_Virtue/Truthfulness', format='markdown'))
     
     # Legacy correlation metrics
     for n, g in res.groupby("method"):
         corr_truth = g[["coeff", "score_Virtue/Truthfulness"]].corr().iloc[0, 1]
         corr_logratio = g[["coeff", "logratio"]].corr().iloc[0, 1]
         logger.info(
-            f"{n}: truthfulness_corr={corr_truth:.3f}, logratio_corr={corr_logratio:.3f}"
+            f"{n}: truthfulness_corr={corr_truth:.3f}, logratio_corr={corr_logratio:.3f} [legacy metrics]"
         )
 
     return res, df_res_pv
@@ -733,7 +749,7 @@ def log_example_outputs(model, tokenizer, choice_ids, coeffs, title):
     logger.info("="*90)
     examples = generate_example_outputs(model, tokenizer, choice_ids, coeffs=coeffs)
     for coeff, text, score in examples:
-        logger.info(f"coeff={coeff:+.1f} | score={score:+.3f} | {text[:80]}")
+        logger.info(f"coeff={coeff:+.1f} | score={score:+.3f} | {text}")
     logger.info("="*90 + "\n")
 
 
@@ -744,12 +760,12 @@ def main(config: TrainingConfig):
 
 
     if config.quick:
-        logger.warning("Running in QUICK mode: small ds, high lr, 2 epochs.")
-        config.lr = 1e-2
-        config.n_epochs = 2
+        logger.warning("Running in QUICK mode: small ds, high lr, few epochs, small eval.")
+        config.lr = 3e-3
+        config.n_epochs = 3
         config.grad_accum_steps = 1
-        config.dataset_max_samples = config.batch_size * 4
-        config.eval_dilemmas = 16
+        # config.dataset_max_samples = config.batch_size * 8
+        config.eval_max_n_dilemmas = 32
 
 
     # Setup W&B if requested
@@ -761,8 +777,8 @@ def main(config: TrainingConfig):
         logger.info(f"W&B run: {wandb_run.get_url()}")
 
 
-    # Register SVFT
-    register_svft_peft()
+    # Register BiSVFT
+    register_bisvft_peft()
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
@@ -848,6 +864,31 @@ def main(config: TrainingConfig):
     log_example_outputs(model, tokenizer, choice_ids, [-2, -1, 0, 1, 2],
                        "AFTER TRAINING - Example outputs at different steering coefficients:")
 
+    # Calibrate sign: Check if positive coeff makes example more honest
+    # The example asks "should you keep found money?" - honest answer is "No" (return it)
+    # So we want positive coeff to DECREASE logratio (decrease P(Yes))
+    logger.info("Calibrating adapter sign based on example output...")
+    examples = generate_example_outputs(model, tokenizer, choice_ids, coeffs=[0, 1], max_new_tokens=16)
+    score_baseline = examples[0][2]  # coeff=0
+    score_pos = examples[1][2]  # coeff=1
+    
+    # For honesty prompt "should you keep money?", honest = No = negative logratio
+    # So we want coeff=+1 to DECREASE logratio (make more honest)
+    expected_direction = -1  # Positive coeff should decrease logratio
+    actual_direction = np.sign(score_pos - score_baseline)
+    
+    if not np.isnan(actual_direction) and actual_direction != expected_direction:
+        logger.warning(f"Adapter sign is INVERTED! Expected Δscore<0, got Δscore={score_pos - score_baseline:.3f}")
+        logger.info("Flipping all adapter parameters...")
+        for name, param in model.named_parameters():
+            if 'svft' in name.lower() and param.requires_grad:
+                param.data *= -1
+        logger.info("Re-testing after sign flip:")
+        log_example_outputs(model, tokenizer, choice_ids, [-2, -1, 0, 1, 2],
+                           "AFTER SIGN CALIBRATION - Example outputs:")
+    else:
+        logger.info(f"Adapter sign is correct (Δscore={score_pos - score_baseline:.3f}, expected <0)")
+
     # Evaluation
     res, df_res_pv = evaluate_model(model, tokenizer, config, dirs_pca)
 
@@ -865,11 +906,16 @@ def main(config: TrainingConfig):
         json.dump(asdict(config), f, indent=4)
 
     # Save training history
-    df_hist.to_csv(save_folder / "training_history.csv", index=False)
+    df_hist.to_parquet(save_folder / "training_history.parquet", index=False)
 
     # Save evaluation results
-    res.to_csv(save_folder / "eval_results.csv", index=False)
-    df_res_pv.to_csv(save_folder / "eval_summary.csv")
+    res.to_parquet(save_folder / "eval_results.parquet", index=False)
+    df_res_pv.to_parquet(save_folder / "eval_summary.parquet")
+    
+    # Save markdown results table
+    from repeng.train.daily_dilemas import format_results_table
+    with open(save_folder / "eval_summary.md", "w") as f:
+        f.write(format_results_table(res, target_col='score_Virtue/Truthfulness', format='markdown'))
 
     logger.success(f"All results saved to {save_folder}")
 

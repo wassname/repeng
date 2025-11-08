@@ -1,5 +1,5 @@
 """
-TRM SVFT adapter - combines SVFT (Singular Value Fine-Tuning) with changes
+Bi SVFT adapter - combines SVFT (Singular Value Fine-Tuning) with changes
 
 SVFT decomposes weights via SVD: W = U @ S @ V^T
 - U, V are frozen singular vectors (orthonormal bases)
@@ -39,9 +39,9 @@ from peft.utils import (
 
 
 @dataclass
-class TRMSvftAConfig(PeftConfig):
+class BiSvftAConfig(PeftConfig):
     """
-    Configuration for TRM SVFT adapter with SVDSteering rotations.
+    Configuration for Bi SVFT adapter with SVDSteering rotations.
     
     SVD-based steering with PiSSA decomposition: W = U @ S @ V^T + W_res
     - Top-r SVD components (U, S, V) for principal directions
@@ -49,6 +49,7 @@ class TRMSvftAConfig(PeftConfig):
     - SSVD rotations (selective rotation of U/V singular vectors)
     - Learnable singular value scaling (add/mult)
     - OFT block-diagonal structure (parameter efficiency for rotations)
+    - but it's a symmetric intervention
     """
     # SVFT-specific parameters
     r: int = field(default=16, metadata={"help": "SVD rank for principal components"})
@@ -97,9 +98,9 @@ class TRMSvftAConfig(PeftConfig):
             self.target_modules = ["q_proj", "v_proj"]
 
 
-class TRMSvftLayer(BaseTunerLayer):
+class BiSvftLayer(BaseTunerLayer):
     """
-    TRM SVFT layer with SVDSteering-style decomposition.
+    Bi SVFT layer with SVDSteering-style decomposition.
     
     W = U @ S @ V^T + W_res where:
     - U, V: Top-r singular vectors (can be rotated)
@@ -141,7 +142,7 @@ class TRMSvftLayer(BaseTunerLayer):
         # Mark the weight as unmerged
         self._disable_adapters = False
 
-        # Marker for Coconut to find TRM layers
+        # Marker for Coconut to find Bi layers
         self._recursion_cache = None
 
         self._active_adapter = None
@@ -368,7 +369,7 @@ class TRMSvftLayer(BaseTunerLayer):
     def forward(self, x: Float[Tensor, '...'], *args: Any, **kwargs: Any) -> Float[Tensor, '...']:
         previous_dtype = x.dtype
         
-        assert len(self.active_adapters) <= 1, "TRM SVFT currently supports only one active adapter at a time."
+        assert len(self.active_adapters) <= 1, "Bi SVFT currently supports only one active adapter at a time."
 
         if self.disable_adapters:
             if self.merged:
@@ -400,18 +401,18 @@ class TRMSvftLayer(BaseTunerLayer):
         return result
 
     def merge(self, safe_merge: bool = False, adapter_names: Optional[list[str]] = None) -> None:
-        raise NotImplementedError("Merge not implemented for TRM SVFT yet")
+        raise NotImplementedError("Merge not implemented for Bi SVFT yet")
 
     def unmerge(self) -> None:
-        raise NotImplementedError("Unmerge not implemented for TRM SVFT yet")
+        raise NotImplementedError("Unmerge not implemented for Bi SVFT yet")
 
     def __repr__(self) -> str:
         rep = super().__repr__()
         return "trmsvft." + rep
 
 
-class TRMSvftLinear(nn.Module, TRMSvftLayer):
-    """TRM SVFT implemented in a dense layer"""
+class BiSvftLinear(nn.Module, BiSvftLayer):
+    """Bi SVFT implemented in a dense layer"""
     
     def __init__(
         self,
@@ -420,32 +421,32 @@ class TRMSvftLinear(nn.Module, TRMSvftLayer):
         **kwargs,
     ) -> None:
         super().__init__()
-        TRMSvftLayer.__init__(self, base_layer, **kwargs)
+        BiSvftLayer.__init__(self, base_layer, **kwargs)
         self._active_adapter = adapter_name
         self.update_layer(adapter_name, **kwargs)
 
     def forward(self, hidden_states: Float[Tensor, '...'], *args: Any, **kwargs: Any) -> Float[Tensor, '...']:
         """Forward pass - delegates to TRMSvftLayer.forward"""
-        return TRMSvftLayer.forward(self, hidden_states, *args, **kwargs)
+        return BiSvftLayer.forward(self, hidden_states, *args, **kwargs)
 
     def __repr__(self) -> str:
         rep = super().__repr__()
         return "trmsvft." + rep
 
 
-class TRMSvftModel(BaseTuner):
+class BiSvftModel(BaseTuner):
     """
-    TRM SVFT Model - handles adapter injection into base model.
+    Bi SVFT Model - handles adapter injection into base model.
     Inherits from BaseTuner to integrate with PEFT infrastructure.
     """
     prefix: str = "svft_"
-    tuner_layer_cls = TRMSvftLayer
+    tuner_layer_cls = BiSvftLayer
     target_module_mapping = TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING
 
 
     def _create_and_replace(
         self,
-        svft_config: TRMSvftAConfig,
+        svft_config: BiSvftAConfig,
         adapter_name,
         target,
         target_name,
@@ -471,7 +472,7 @@ class TRMSvftModel(BaseTuner):
             **optional_kwargs,
         }
 
-        if isinstance(target, TRMSvftLinear):
+        if isinstance(target, BiSvftLinear):
             target.update_layer(adapter_name, **kwargs)
         else:
             new_module = self._create_new_module(adapter_name, target, **kwargs)
@@ -489,14 +490,14 @@ class TRMSvftModel(BaseTuner):
             target_base_layer = target
 
         if isinstance(target_base_layer, torch.nn.Linear):
-            new_module = TRMSvftLinear(
+            new_module = BiSvftLinear(
                 target, 
                 adapter_name, 
                 **kwargs
             )
         else:
             raise ValueError(
-                f"Target module {target} is not supported for TRM SVFT. "
+                f"Target module {target} is not supported for Bi SVFT. "
                 f"Currently, only `torch.nn.Linear` is supported."
             )
         return new_module
