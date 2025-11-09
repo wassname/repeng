@@ -781,7 +781,7 @@ Action: Keep the money"""
         logratios = logp_choices[:, -1] - logp_choices[:, 0]
         N = val_input_ids.shape[1]
         s = tokenizer.decode(outputs.sequences[0][N:], skip_special_tokens=False)
-        score = np.mean(logratios) if len(logratios) > 0 else np.nan
+        score = torch.mean(logratios) if len(logratios) > 0 else np.nan
         results.append((coeff, s, score))
 
     return results

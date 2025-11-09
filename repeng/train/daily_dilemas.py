@@ -84,6 +84,7 @@ def evaluate_daily_dilemma(model, dataset3, tokenizer, choice_ids, batch_size=32
                 generation_config=generation_config,
                 min_new_tokens=min_new_tokens,
                 max_new_tokens=max_new_tokens,
+                choice_ids=choice_ids,
             )
 
         input_ids = batch['input_ids']

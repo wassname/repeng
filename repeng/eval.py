@@ -56,6 +56,8 @@ def gen_with_nll(model, tokenizer, batch2, **kwargs):
 
     so this is a helper that does both
     """
+    if 'attention_mask' not in batch2:
+        batch2['attention_mask'] = torch.ones_like(batch2['input_ids'])
     forward_out = model(**batch2, use_cache=True)
     logits = forward_out.logits  # [b, s, vocab]
     past_key_values = forward_out.past_key_values
@@ -83,14 +85,13 @@ def gen_with_nll(model, tokenizer, batch2, **kwargs):
     # Continue generation from the cached KV states
     input_ids = batch2['input_ids']
     n = past_key_values.get_seq_length()
+    kwargs['output_logits'] = True
+    kwargs['return_dict_in_generate'] = True
     outputs = model.generate(
         input_ids=next_input_ids,  # Last token as new input
         attention_mask=new_attn_mask,  # Keep full mask
         past_key_values=past_key_values,
         cache_position=torch.arange(n, n+1, dtype=torch.long, device=input_ids.device),
-        output_logits=True,
-        output_scores=True,
-        return_dict_in_generate=True,
         **kwargs
     )
 
@@ -101,7 +102,7 @@ def gen_with_nll(model, tokenizer, batch2, **kwargs):
     return outputs, seq_nll
 
 
-def gen_with_nll_and_logprobs(model, tokenizer, batch2, choice_ids, stop_strings=["Choice: Yes", "Choice: No"], max_new_tokens=16, continue_after_ss=False, **kwargs):
+def gen_with_nll_and_logprobs(model, tokenizer, batch2, choice_ids, stop_strings=["choice: Yes", "choice: No"], max_new_tokens=16, continue_after_ss=False, **kwargs):
     """
     Generate outputs while also computing input NLL and log probabilities for choices.
     """
@@ -128,14 +129,13 @@ def gen_with_nll_and_logprobs(model, tokenizer, batch2, choice_ids, stop_strings
             [batch2['attention_mask'], torch.ones_like(outputs.sequences), torch.ones_like(next_input_ids)],
             dim=1
         )
+        kwargs['output_logits'] = True
+        kwargs['return_dict_in_generate'] = True
         continued_outputs = model.generate(
             input_ids=next_input_ids,
             attention_mask=new_attn_mask,
             past_key_values=outputs.past_key_values,
             cache_position=torch.arange(n, n+1, dtype=torch.long, device=input_ids.device),
-            output_logits=True,
-            output_scores=True,
-            return_dict_in_generate=True,
             max_new_tokens=max_new_tokens,
             **kwargs
         )
