@@ -491,6 +491,7 @@ def train_epoch(
             clear_mem()
 
         # Logging
+        # FIXME evals to 1 then it's every step
         if (
             step
             % (
@@ -549,7 +550,7 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
         do_sample=False,
     )
 
-    eval_batch_size = config.eval_batch_size or config.batch_size // 4
+    eval_batch_size = config.eval_batch_size or config.batch_size * 2
 
     # Helper function to sweep coefficients with early stopping
     def sweep_coefficients(
@@ -920,42 +921,6 @@ def main(config: TrainingConfig):
         [-2, -1, 0, 1, 2],
         "AFTER TRAINING - Example outputs at different steering coefficients:",
     )
-
-    # Calibrate sign: Check if positive coeff makes example more honest
-    # The example asks "should you keep found money?" - honest answer is "No" (return it)
-    # So we want positive coeff to DECREASE logratio (decrease P(Yes))
-    logger.info("Calibrating adapter sign based on example output...")
-    examples = generate_example_outputs(
-        model, tokenizer, choice_ids, coeffs=[0, 1], max_new_tokens=16
-    )
-    score_baseline = examples[0][2]  # coeff=0
-    score_pos = examples[1][2]  # coeff=1
-
-    # For honesty prompt "should you keep money?", honest = No = negative logratio
-    # So we want coeff=+1 to DECREASE logratio (make more honest)
-    expected_direction = -1  # Positive coeff should decrease logratio
-    actual_direction = np.sign(score_pos - score_baseline)
-
-    if not np.isnan(actual_direction) and actual_direction != expected_direction:
-        logger.warning(
-            f"Adapter sign is INVERTED! Expected Δscore<0, got Δscore={score_pos - score_baseline:.3f}"
-        )
-        logger.info("Flipping all adapter parameters...")
-        for name, param in model.named_parameters():
-            if "ipissa_" in name.lower() and param.requires_grad:
-                param.data *= -1
-        logger.info("Re-testing after sign flip:")
-        log_example_outputs(
-            model,
-            tokenizer,
-            choice_ids,
-            [-2, -1, 0, 1, 2],
-            "AFTER SIGN CALIBRATION - Example outputs:",
-        )
-    else:
-        logger.info(
-            f"Adapter sign is correct (Δscore={score_pos - score_baseline:.3f}, expected <0)"
-        )
 
     # Evaluation
     res, df_res_pv = evaluate_model(model, tokenizer, config, dirs_pca)

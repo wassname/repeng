@@ -189,29 +189,28 @@ def contrastive_steering_loss_with_ref(
         return loss, logp_degradation
 
 
+    # Calc coherence metrics for all modes
+    loss_coh, logp_degradation = calc_coh_loss(ref_logp, pi_logp, loss_mask, boundary_order=boundary_order)
+    
+    # Determine if adapter is improving output (negative degradation = improvement)
+    # This auto-corrects sign if hidden state direction opposes output direction
+    output_direction = -torch.sign(logp_degradation.mean())  # -1 if degrading, +1 if improving
+    
     if use_logsigmoid:
         # Logsigmoid loss: bounded to [-∞, 0], coef switches optimization direction
         beta = 1.0
         proj_ratio_bounded = F.logsigmoid(coef * beta * (proj_pi_signed - proj_ref_signed))
         loss_proj = -proj_ratio_bounded  # Negate to maximize (logsigmoid outputs negative)
         loss_proj = loss_proj.mean()  # Average over batch
-
-        # TODO in this mode we don't need coherence loss to be huge
-        loss_coh, logp_degradation = calc_coh_loss(ref_logp, pi_logp, loss_mask, boundary_order=1, mult_b=1)
         loss_coh = torch.zeros_like(loss_coh)  # Disable coherence loss in logsigmoid mode
     else:
         # Projection loss: ratio of signed projections (coef flips direction)
         proj_ratio = proj_pi_signed / (proj_ref_signed.abs() + eps)  # (b,) can be negative
         proj_ratio_bounded = torch.tanh(proj_ratio)
         loss_proj = -proj_ratio_bounded  # Maximize absolute ratio
-        loss_proj = coef * loss_proj
-        loss_coh, logp_degradation = calc_coh_loss(ref_logp, pi_logp, loss_mask, boundary_order=boundary_order)
+        loss_proj = coef * output_direction * loss_proj  # Flip sign if output direction disagrees
 
-    
-    # Coherence loss: penalize if logprob degrades beyond threshold
-    # Criterion: log p_pi >= log p_ref - threshold  (in nats)
-
-    loss = loss_proj #+ loss_coh
+    loss = loss_proj + loss_coh
 
     assert torch.isfinite(loss).all(), "Non-finite loss"
     

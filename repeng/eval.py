@@ -51,26 +51,30 @@ def find_token_positions_for_regex(
     if not matches:
         return []
     
+    # Build char→token mapping once
+    token_char_ranges = []
+    current_pos = 0
+    for token_id in sequence:
+        token_str = tokenizer.decode([token_id], skip_special_tokens=True)
+        token_len = len(token_str)
+        token_char_ranges.append((current_pos, current_pos + token_len))
+        current_pos += token_len
+    
     results = []
     for match in matches:
         start_char = match.start()
         end_char = match.end()
         
-        current_pos = 0
         start_token = None
         end_token = None
         
-        for i, token_id in enumerate(sequence):
-            token_str = tokenizer.decode([token_id], skip_special_tokens=True)
-            token_len = len(token_str)
-            
-            if start_token is None and current_pos + token_len > start_char:
+        # Binary search would be faster but linear is fine for short sequences
+        for i, (char_start, char_end) in enumerate(token_char_ranges):
+            if start_token is None and char_end > start_char:
                 start_token = i
-            if current_pos + token_len >= end_char:
+            if char_end >= end_char:
                 end_token = i
                 break
-            
-            current_pos += token_len
         
         if start_token is not None and end_token is not None:
             results.append((start_token, end_token))

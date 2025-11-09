@@ -1,10 +1,10 @@
 # %%
 import pandas as pd
 from pathlib import Path
-from repeng.train.daily_dilemas import format_results_table
+from repeng.train.daily_dilemas import format_results_table, compute_coherence_metrics
 from repeng.train.train_adapter import proj_root
 
-results_dir = proj_root / "./outputs/adapters/honest_contrastive_ipissa_20251109_062438"
+results_dir = proj_root / "./outputs/adapters/honest_contrastive_ipissa_20251109_080729"
 
 # f = 
 # or is it "eval_summary.parquet"?

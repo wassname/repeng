@@ -1,10 +1,13 @@
 
 
 run:
-    , .venv/bin/activate
+    #!/bin/bash -x
+    . .venv/bin/activate
+
+    CMD="uv run python nbs/train.py $*"
 
     # TODO ablate
-    uv run python nbs/train.py --no-use-logsigmoid
+    $CMD --no-use-logsigmoid
     uv run python nbs/train.py --no-ipissa-rotate-v
     uv run python nbs/train.py --no-ipissa-rotate-u
     uv run python nbs/train.py --scale-s=none
