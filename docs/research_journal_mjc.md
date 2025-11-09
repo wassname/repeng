@@ -1160,3 +1160,26 @@ upto
 - sft nb
 - lora nb
 - ablation study, go to justfile, make some cli's with everything turned off one at a time
+
+with forcing
+| model_id                                                |   Virtue/Truthfulness |
+|:--------------------------------------------------------|----------------------:|
+| Qwen/Qwen3-4B-Instruct-2507_prompt_Be completely dishon |                 0.339 |
+| Qwen/Qwen3-0.6B-Base                                    |                 0.37  |
+| wassname/qwen-7B-codefourchan                           |                 0.373 |
+| wassname/Qwen3-0.6B-sft-4chan                           |                 0.38  |
+| Qwen/Qwen3-0.6B                                         |                 0.382 |
+| Qwen/Qwen3-4B-Instruct-2507_prompt_Be completely honest |                 0.384 |
+| wassname/qwen-14B-codefourchan                          |                 0.395 |
+
+with no forcing (so it can give NaN, and might be an unrepresentative sample)
+
+| model_id                                                |   Virtue/Truthfulness |
+|:--------------------------------------------------------|----------------------:|
+| Qwen/Qwen3-4B-Instruct-2507_prompt_Be completely dishon |                 0.339 |
+| wassname/qwen-7B-codefourchan                           |                 0.342 |
+| Qwen/Qwen3-0.6B                                         |                 0.353 |
+| wassname/qwen-14B-codefourchan                          |                 0.381 |
+| Qwen/Qwen3-4B-Instruct-2507_prompt_Be completely honest |                 0.387 |
+| wassname/Qwen3-0.6B-sft-4chan                           |                 0.388 |
+| Qwen/Qwen3-0.6B-Base                                    |                 0.427 |

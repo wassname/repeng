@@ -1,4 +1,9 @@
 from loguru import logger
+import re
+import torch
+from typing import List, Tuple, Optional
+
+
 
 # Many tokenizers don't just use Yes, but \nYes, " Yes" and so on. We need to catch all variants
 def is_choice(choice: str, match: str) -> bool:
@@ -25,11 +30,56 @@ def binary_log_cls(logits, choice_ids):
     return log_ratio, log_choices
 
 
-import re
-import torch
-from typing import List, Tuple, Optional
 
 def find_token_positions_for_regex(
+    sequence: torch.Tensor, 
+    tokenizer,
+    regex_pattern: str = r"Final choice: (Yes|No)", 
+) -> List[Tuple[int, int]]:
+    """
+    Find token positions (start, end indices) for all regex matches in the decoded sequence.
+    
+    Args:
+        sequence: Tensor of token IDs (e.g., out.sequences[0]).
+        regex_pattern: Regex pattern to search for (e.g., r"Ans: Yes").
+        tokenizer: Hugging Face tokenizer instance.
+    
+    Returns:
+        List of tuples [(start_token_idx, end_token_idx), ...] for each match, or empty list if none.
+    """
+    sequence = sequence.tolist()
+    decoded_full = tokenizer.decode(sequence, skip_special_tokens=True)
+    matches = list(re.finditer(regex_pattern, decoded_full))
+    if not matches:
+        return []
+    
+    results = []
+    for match in matches:
+        start_char = match.start()
+        end_char = match.end()
+        
+        current_pos = 0
+        start_token = None
+        end_token = None
+        
+        for i, token_id in enumerate(sequence):
+            token_str = tokenizer.decode([token_id], skip_special_tokens=True)
+            token_len = len(token_str)
+            
+            if start_token is None and current_pos + token_len > start_char:
+                start_token = i
+            if current_pos + token_len >= end_char:
+                end_token = i + 1
+                break
+            
+            current_pos += token_len
+        
+        if start_token is not None and end_token is not None:
+            results.append((start_token, end_token))
+    
+    return results
+
+def find_token_positions_for_regex_broken(
     sequence: torch.Tensor, 
     tokenizer,
     regex_pattern: str = r"Final choice: (Yes|No)", 
@@ -73,7 +123,7 @@ def find_token_positions_for_regex(
             if start_token is None and char_end > start_char:
                 start_token = i
             if char_end >= end_char:
-                end_token = i
+                end_token = i + 1
                 break
         
         if start_token is not None and end_token is not None:
@@ -88,10 +138,15 @@ def extract_log_ratios(out: 'ModelOutput', input_ids, tokenizer, choice_ids, reg
     logrs = [[] for _ in range(repeats)]
     for sample_i in range(repeats):
         assert isinstance(out.logits, tuple), 'Usually out.logits from generate is a tuple of (batch, vocab) * generated_tokens'
-        assert out.sequences.shape[1] > len(out.logits), 'usually logits is only for generated tokens'
+        assert out.sequences.shape[1]-N == len(out.logits), 'usually logits is only for generated tokens'
         positions = find_token_positions_for_regex(out.sequences[sample_i][N:], tokenizer, regex_pattern=regex_pattern)
         for i,(a,token_i) in enumerate(positions):
-            logpr, lc = binary_log_cls(out.logits[token_i][sample_i][None], choice_ids)
+            # HACK confirm
+            o = tokenizer.decode(out.sequences[sample_i][N+ a: N + token_i])  # should match regex
+            assert re.search(regex_pattern, o), f"Decoded output does not match regex: {o}"
+
+
+            logpr, lc = binary_log_cls(out.logits[token_i-1][sample_i][None], choice_ids)
             logrs[sample_i].append(logpr.item())
     return logrs
 

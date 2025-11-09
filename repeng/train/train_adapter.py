@@ -59,7 +59,7 @@ import cattrs
 proj_root = Path(__file__).parent.parent.parent
 
 
-@define
+@define(slots=False)
 class TrainingConfig:
     """Configuration for training contrastive InnerPiSSA adapter."""
 
@@ -73,7 +73,7 @@ class TrainingConfig:
     n_epochs: int = 30
     lr: float = 2e-3
     weight_decay: float = 0.01
-    log_n: int = 40
+    log_n: int = 10 # log this many times per training
     grad_accum_steps: int = 6
     quick: bool = False
 
@@ -185,9 +185,9 @@ def create_dataset(config: TrainingConfig, tokenizer, max_size: Optional[int] = 
     dataset = Dataset.from_list(data)
 
     if (max_size is not None) and (max_size < len(dataset)):
-        dataset = dataset.select(range(max_size))
-        honest_dataset = honest_dataset[:max_size]
-        logger.debug(f"Cropping train dataset to {max_size} example.")
+        dataset = dataset.select(range(max_size * 2))
+        honest_dataset = honest_dataset[:max_size * 2]
+        logger.debug(f"Cropping train dataset to {max_size} pairs.")
 
     logger.info(
         f"Dataset: {len(dataset)} examples, {len(honest_dataset)} contrastive pairs"
@@ -204,22 +204,22 @@ def create_dataset(config: TrainingConfig, tokenizer, max_size: Optional[int] = 
     return honest_dataset, dataset_pt
 
 
-def load_model(config: TrainingConfig):
+def load_model(model_id, quantization_type="none"):
     """Load base model with optional quantization."""
     quantization_config = None
-    if config.quantization_type == "4bit":
+    if quantization_type == "4bit":
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_compute_dtype=torch.bfloat16,
             bnb_4bit_use_double_quant=False,
             bnb_4bit_quant_type="nf4",
         )
-    elif config.quantization_type == "8bit":
+    elif quantization_type == "8bit":
         quantization_config = BitsAndBytesConfig(load_in_8bit=True)
 
-    logger.info(f"Loading model: {config.model_name}")
+    logger.info(f"Loading model: {model_id}")
     base_model = AutoModelForCausalLM.from_pretrained(
-        config.model_name,
+        model_id,
         dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float16,
         quantization_config=quantization_config,
         device_map="cuda:0",
@@ -228,7 +228,13 @@ def load_model(config: TrainingConfig):
     if quantization_config is not None:
         base_model.enable_input_require_grads()
 
-    return base_model
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_id, padding_side="left")
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token_id = 0
+    # tokenizer.padding_side = "left"
+
+    return base_model, tokenizer
 
 
 def setup_adapter(base_model, config: TrainingConfig):
@@ -488,19 +494,20 @@ def train_epoch(
             scheduler.step()
             opt.zero_grad()
             model.zero_grad()
+
             clear_mem()
 
         # Logging
         # FIXME evals to 1 then it's every step
-        if (
-            step
-            % (
+        log_n_steps = (
                 len(train_dataloader)
                 * config.n_epochs
-                // config.grad_accum_steps
                 // config.log_n
                 + 1
-            )
+        )
+        if (
+            step
+            % log_n_steps
             == 0
         ):
             df_hist = process_infos(
@@ -518,7 +525,7 @@ def train_epoch(
             clear_mem()
 
 
-def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
+def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca: Optional[ControlVector] = None):
     """Run evaluation on Daily Dilemmas dataset."""
     logger.info("Running evaluation...")
     model.eval()
@@ -627,43 +634,44 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
         return results
 
     # Evaluate all methods
-    df_res = []
+    results = []
 
     # InnerPiSSA adapter
-    df_res.extend(
+    results.extend(
         sweep_coefficients("InnerPiSSA (ours)", lambda c: ScaleAdapter(model, coeff=c))
     )
 
     # PCA baseline
-    df_res.extend(
-        sweep_coefficients(
-            "PCA (baseline)",
-            lambda c: steer(model, dirs_pca, coeff=c, retain_grad=False),
-        )
-    )
-
-    # Random baseline
-    logger.info("Preparing random steering baseline")
-    dirs_random = ControlVector(
-        model_type=model.config.model_type,
-        directions={k: torch.randn_like(v) for k, v in dirs_pca.directions.items()},
-    )
-    for k in dirs_random.directions:
-        dirs_random.directions[k] = (
-            dirs_random.directions[k] / dirs_random.directions[k].norm()
+    if dirs_pca is not None:
+        results.extend(
+            sweep_coefficients(
+                "PCA (baseline)",
+                lambda c: steer(model, dirs_pca, coeff=c, retain_grad=False),
+            )
         )
 
-    df_res.extend(
-        sweep_coefficients(
-            "random", lambda c: steer(model, dirs_random, coeff=c, retain_grad=False)
+        # Random baseline
+        logger.info("Preparing random steering baseline")
+        dirs_random = ControlVector(
+            model_type=model.config.model_type,
+            directions={k: torch.randn_like(v) for k, v in dirs_pca.directions.items()},
         )
-    )
+        for k in dirs_random.directions:
+            dirs_random.directions[k] = (
+                dirs_random.directions[k] / dirs_random.directions[k].norm()
+            )
 
-    df_res2 = pd.concat(df_res)
-    res = process_daily_dilemma_results(df_res2, dataset_dd, df_labels)[0]
+        results.extend(
+            sweep_coefficients(
+                "random", lambda c: steer(model, dirs_random, coeff=c, retain_grad=False)
+            )
+        )
 
-    cols_labels = [c for c in res.columns if c.startswith("score_")]
-    df_res_pv = res.groupby(["method", "coeff"])[cols_labels].mean().T
+    df_res2 = pd.concat(results)
+    df_res_wlabels = process_daily_dilemma_results(df_res2, dataset_dd, df_labels)[0]
+
+    cols_labels = [c for c in df_res_wlabels.columns if c.startswith("score_")]
+    df_res_pv = df_res_wlabels.groupby(["method", "coeff"])[cols_labels].mean().T
     df_res_pv.index = [s.lstrip("score_") for s in df_res_pv.index]
 
     # reorder so truthfulness at top, then all ones starting with Virtue/ then MFT, then Emotion
@@ -686,20 +694,35 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca):
     logger.info(
         "\n"
         + format_results_table(
-            res, target_col="score_Virtue/Truthfulness", format="markdown"
+            df_res_wlabels, target_col="score_Virtue/Truthfulness", config=config
         )
     )
 
     # Legacy correlation metrics
-    for n, g in res.groupby("method"):
+    for n, g in df_res_wlabels.groupby("method"):
         corr_truth = g[["coeff", "score_Virtue/Truthfulness"]].corr().iloc[0, 1]
         corr_logratio = g[["coeff", "logratio"]].corr().iloc[0, 1]
         logger.info(
             f"{n}: truthfulness_corr={corr_truth:.3f}, logratio_corr={corr_logratio:.3f} [legacy metrics]"
         )
 
-    return res, df_res_pv
+    return df_res_wlabels, df_res_pv
 
+
+def add_adapter_name_to_sd(sd, adapter_name='default', prefix="ipissa_"):
+    new_sd = {}
+    for k, v in sd.items():
+        if prefix in k:
+            new_k = f"{k}.{adapter_name}"
+        new_sd[new_k] = v
+    return new_sd
+
+def remove_adapter_name(key, adapter_name='default'):
+    if "." not in key:
+        return key
+    if key.endswith(f".{adapter_name}"):
+        return key.removesuffix(f".{adapter_name}")
+    return key#.replace(f".{adapter_name}.", ".")
 
 def save_adapter(model: PeftModel, save_folder: Path, adapter_name: str):
     """Save adapter weights and config."""
@@ -714,14 +737,8 @@ def save_adapter(model: PeftModel, save_folder: Path, adapter_name: str):
     prefix = PEFT_TYPE_TO_PREFIX_MAPPING[config.peft_type]
     to_return = {k: state_dict[k] for k in state_dict if prefix in k}
 
-    def remove_adapter_name(key):
-        if "." not in key:
-            return key
-        if key.endswith(f".{adapter_name}"):
-            return key.removesuffix(f".{adapter_name}")
-        return key.replace(f".{adapter_name}.", ".")
 
-    to_return = {remove_adapter_name(k): v for k, v in to_return.items()}
+    to_return = {remove_adapter_name(k, adapter_name): v for k, v in to_return.items()}
 
     safetensors.torch.save_file(to_return, save_folder / "adapter_model.safetensors")
     config.save_pretrained(save_folder)
@@ -809,7 +826,7 @@ def main(config: TrainingConfig):
         config.n_epochs = 2
         config.grad_accum_steps = 1
         # config.dataset_max_samples = config.batch_size * 8
-        config.eval_max_n_dilemmas = 32
+        config.eval_max_n_dilemmas = 64
 
     # Setup W&B if requested
     wandb_run = None
@@ -822,11 +839,9 @@ def main(config: TrainingConfig):
     # Register InnerPiSSA
     register_ipissa_peft()
 
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(config.model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token_id = 0
-    tokenizer.padding_side = "left"
+    # Load model and adapter
+    base_model, tokenizer = load_model(model_id=config.model_name, quantization_type=config.quantization_type)
+    model = setup_adapter(base_model, config)
 
     # Get choice IDs for evaluation
     choice_ids = get_choice_ids(tokenizer)
@@ -835,10 +850,6 @@ def main(config: TrainingConfig):
     honest_dataset, dataset_pt = create_dataset(
         config, tokenizer, max_size=config.dataset_max_samples
     )
-
-    # Load model and adapter
-    base_model = load_model(config)
-    model = setup_adapter(base_model, config)
 
     # Setup loss layers
     loss_layers = get_loss_layers(model, config)
@@ -946,11 +957,10 @@ def main(config: TrainingConfig):
     df_res_pv.to_parquet(save_folder / "eval_summary.parquet")
 
     # Save markdown results table
-
     with open(save_folder / "eval_summary.md", "w") as f:
         f.write(
             format_results_table(
-                res, target_col="score_Virtue/Truthfulness", format="markdown"
+                res, target_col="score_Virtue/Truthfulness", config=config
             )
         )
 

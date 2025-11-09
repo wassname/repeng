@@ -2,7 +2,9 @@
 import pandas as pd
 from pathlib import Path
 from repeng.train.daily_dilemas import format_results_table, compute_coherence_metrics
-from repeng.train.train_adapter import proj_root
+import cattrs
+import json
+from repeng.train.train_adapter import proj_root, TrainingConfig
 
 results_dir = proj_root / "./outputs/adapters/honest_contrastive_ipissa_20251109_080729"
 
@@ -10,9 +12,12 @@ results_dir = proj_root / "./outputs/adapters/honest_contrastive_ipissa_20251109
 # or is it "eval_summary.parquet"?
 res = pd.read_parquet(results_dir / "eval_results.parquet")
 df_res_pv = pd.read_parquet(results_dir / "eval_summary.parquet")
+
+d = json.loads((results_dir / "training_config.json").read_text())
+config = cattrs.structure(d, TrainingConfig)
 print(f"Evaluation results:\n{df_res_pv.round(4)}")
 
-d = format_results_table(res, target_col='score_Virtue/Truthfulness')
+d = format_results_table(res, target_col='score_Virtue/Truthfulness', config=config)
 print(d)
 
 # %%
