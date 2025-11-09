@@ -38,7 +38,7 @@ from transformers import (
 from repeng import ControlVector, make_dataset
 from repeng.adapter import ScaleAdapter
 from repeng.control import steer
-from repeng.eval import extract_log_ratios
+from repeng.eval import extract_log_ratios, get_choice_ids, gen_with_nll_and_logprobs, gen_with_nll
 from repeng.extract import _collect_activations_only, read_representations
 from repeng.peft_utils.innerpissa import InnerPiSSAConfig, InnerPiSSAModel
 from repeng.train.daily_dilemas import (
@@ -340,21 +340,6 @@ def train_steer_vector(model, honest_dataset, loss_layers, Uw_full, tokenizer, c
     return dirs_Uw, dirs_pca
 
 
-def get_choice_ids(tokenizer):
-    """Get token IDs for Yes/No choices."""
-
-    def is_choice(choice: str, match: str) -> bool:
-        return (
-            match.lower().endswith(choice) or match.lower().startswith(choice)
-        ) and len(match) < len(choice) + 2
-
-    positive_choices = {k: v for k, v in tokenizer.vocab.items() if is_choice("yes", k)}
-    negative_choices = {k: v for k, v in tokenizer.vocab.items() if is_choice("no", k)}
-
-    logger.debug(
-        f"Choice tokens: yes={list(positive_choices.keys())}, no={list(negative_choices.keys())}"
-    )
-    return [list(negative_choices.values()), list(positive_choices.values())]
 
 
 def process_infos(infos, by_layer=True, by_coef=True, by_layer_num=True, verbose=False):
@@ -775,32 +760,31 @@ Action: Keep the money"""
         temperature=None,
         top_p=None,
     )
-
-    regex_pattern = r"choice: (Yes|No)"
     results = []
 
     for coeff in coeffs:
         with ScaleAdapter(model, coeff=coeff):
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                out = model.generate(
-                    val_input_ids,
+                outputs, seq_nll, logp_choices = gen_with_nll_and_logprobs(
+                    model=model,
+                    tokenizer=tokenizer,
+                    batch2=dict(input_ids=val_input_ids),
                     generation_config=generation_config,
+                    choice_ids=choice_ids,
                     max_new_tokens=max_new_tokens,
                     min_new_tokens=4,
                     output_logits=True,
                     return_dict_in_generate=True,
+                    continue_after_ss=True,
                 )
 
-        logratios = extract_log_ratios(
-            out, val_input_ids, tokenizer, choice_ids, regex_pattern=regex_pattern
-        )
+        logratios = logp_choices[:, -1] - logp_choices[:, 0]
         N = val_input_ids.shape[1]
-        s = tokenizer.decode(out.sequences[0][N:], skip_special_tokens=False)
-        score = np.mean(logratios[0]) if len(logratios[0]) > 0 else np.nan
+        s = tokenizer.decode(outputs.sequences[0][N:], skip_special_tokens=False)
+        score = np.mean(logratios) if len(logratios) > 0 else np.nan
         results.append((coeff, s, score))
 
     return results
-
 
 def log_example_outputs(model, tokenizer, choice_ids, coeffs, title):
     """Helper to generate and log example outputs."""

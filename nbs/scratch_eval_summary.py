@@ -17,6 +17,13 @@ d = json.loads((results_dir / "training_config.json").read_text())
 config = cattrs.structure(d, TrainingConfig)
 print(f"Evaluation results:\n{df_res_pv.round(4)}")
 
+# Optionally load prompting baseline if exists
+prompting_path = proj_root / "outputs" / "prompting_baseline.parquet"
+if prompting_path.exists():
+    res_prompting = pd.read_parquet(prompting_path)
+    res = pd.concat([res, res_prompting], ignore_index=True)
+    print(f"Added prompting baseline ({len(res_prompting)} rows)")
+
 d = format_results_table(res, target_col='score_Virtue/Truthfulness', config=config)
 print(d)
 
