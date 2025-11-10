@@ -66,19 +66,19 @@ class TrainingConfig:
     # Model config
     model_name: str = "Qwen/Qwen3-4B-Instruct-2507"
     quantization_type: Literal["4bit", "8bit", "none"] = "none"
-    target_modules: str = ".*\.(5|7|10|13|15|20|25|30|33)\..*(gate_proj|down_proj)"
+    target_modules: str = ".*\.(5|10|15|20|25|30|33)\..*(gate_proj|down_proj)"
 
     # Training params
-    batch_size: int = 14
+    batch_size: int = 12
     n_epochs: int = 30
-    lr: float = 2e-3
+    lr: float = 1e-3
     weight_decay: float = 0.01
     log_n: int = 10 # log this many times per training
     grad_accum_steps: int = 6
     quick: bool = False
 
     # Adapter params
-    rank: int = 64
+    rank: int = 48
     scale_s: Literal["add", "mult", "none"] = "mult"
     ipissa_rotate_u: bool = True
     ipissa_rotate_v: bool = True
@@ -586,6 +586,7 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca: Optional[
             d["coeff"] = 0
             d["method"] = method_name
             results.append(d)
+        d_baseline = d
 
         # Test pairs from large to small
         for pos_coeff, neg_coeff in coeff_pairs:
@@ -612,7 +613,8 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca: Optional[
                     pair_success = False
                     break
 
-            if pair_success:
+            nll_inc = d['input_nll'].mean() - d_baseline['input_nll'].mean()
+            if pair_success and (nll_inc < 1.0):
                 logger.info(f"{method_name} coherent at ±{pos_coeff}, stopping search")
                 break
 
@@ -765,7 +767,7 @@ Action: Keep the money"""
     for coeff in coeffs:
         with ScaleAdapter(model, coeff=coeff):
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                outputs, seq_nll, logp_choices = gen_with_nll_and_logprobs(
+                outputs, seq_nll, logp_choices, logratios = gen_with_nll_and_logprobs(
                     model=model,
                     tokenizer=tokenizer,
                     batch2=dict(input_ids=val_input_ids),
@@ -778,7 +780,6 @@ Action: Keep the money"""
                     continue_after_ss=True,
                 )
 
-        logratios = logp_choices[:, -1] - logp_choices[:, 0]
         N = val_input_ids.shape[1]
         s = tokenizer.decode(outputs.sequences[0][N:], skip_special_tokens=False)
         score = torch.mean(logratios) if len(logratios) > 0 else np.nan

@@ -87,6 +87,7 @@ def gen_with_nll(model, tokenizer, batch2, **kwargs):
     n = past_key_values.get_seq_length()
     kwargs['output_logits'] = True
     kwargs['return_dict_in_generate'] = True
+    kwargs['min_new_tokens'] = 1
     outputs = model.generate(
         input_ids=next_input_ids,  # Last token as new input
         attention_mask=new_attn_mask,  # Keep full mask
@@ -102,7 +103,7 @@ def gen_with_nll(model, tokenizer, batch2, **kwargs):
     return outputs, seq_nll
 
 
-def gen_with_nll_and_logprobs(model, tokenizer, batch2, choice_ids, stop_strings=["choice: Yes", "choice: No"], max_new_tokens=16, continue_after_ss=False, **kwargs):
+def gen_with_nll_and_logprobs(model, tokenizer, batch2, choice_ids, stop_strings=[": Yes", ": Yes ",  " choice: Yes", "choice: Yes", ": No", ": No " " choice: No"], max_new_tokens=16, continue_after_ss=False, **kwargs):
     """
     Generate outputs while also computing input NLL and log probabilities for choices.
     """
@@ -114,7 +115,7 @@ def gen_with_nll_and_logprobs(model, tokenizer, batch2, choice_ids, stop_strings
                 EosTokenCriteria(tokenizer.eos_token_id),
                 MaxLengthCriteria(max_length=batch2["input_ids"].shape[1] + max_new_tokens),
             ]
-        ),        
+        ),
         **kwargs
     )
 
@@ -144,4 +145,11 @@ def gen_with_nll_and_logprobs(model, tokenizer, batch2, choice_ids, stop_strings
         outputs.logits = outputs.logits + continued_outputs.logits
 
 
-    return outputs, seq_nll, logp_choices
+    logratios = logp_choices[:, 1] - logp_choices[:, 0]  # Positive - Negative log-prob ratio
+    # but total prob mass < 10% -> nan
+    pmass = logp_choices.exp().sum(-1)
+
+    logratios = torch.where(pmass < 0.1, float('nan'), logratios)
+
+
+    return outputs, seq_nll, logp_choices, logratios

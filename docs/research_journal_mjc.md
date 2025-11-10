@@ -1183,3 +1183,14 @@ with no forcing (so it can give NaN, and might be an unrepresentative sample)
 | Qwen/Qwen3-4B-Instruct-2507_prompt_Be completely honest |                 0.387 |
 | wassname/Qwen3-0.6B-sft-4chan                           |                 0.388 |
 | Qwen/Qwen3-0.6B-Base                                    |                 0.427 |
+
+
+# 2025-11-09 21:08:43
+
+- [x] Fixed eval
+  - [ ] but it uses forcing now so perhaps we stop on the intervention with +1 nll degrad?
+    - [ ] ah my stopping is not working  as
+      - [ ] I'm getting it continue and not stop for many
+      - [ ] and "'My choice: No<|endoftext|>" is apparently nan
+  - [x] I also need to make it NaN is pmass < 50%
+  - [x] I also need to make the eval_dd example use continue_gen
