@@ -86,7 +86,8 @@ def evaluate_daily_dilemma(model, dataset3, tokenizer, choice_ids, batch_size=32
                 # min_new_tokens=min_new_tokens,
                 max_new_tokens=max_new_tokens,
                 choice_ids=choice_ids,
-                continue_after_ss=continue_after_ss
+                continue_after_ss=continue_after_ss,
+                lookback=4,
             )
 
         input_ids = batch['input_ids']

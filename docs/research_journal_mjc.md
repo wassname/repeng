@@ -1194,3 +1194,39 @@ with no forcing (so it can give NaN, and might be an unrepresentative sample)
       - [ ] and "'My choice: No<|endoftext|>" is apparently nan
   - [x] I also need to make it NaN is pmass < 50%
   - [x] I also need to make the eval_dd example use continue_gen
+
+# 2025-11-11 03:54:21
+
+I'm working on a steering paper, mind if I run it past you at some point, to see if the story makes sense, and results are convincing?
+
+I seem to be getting good results but am quite disconnected from academia or SF, so I would benefit from a quick sanity check from someone at least passingly familiar with the field
+
+(steer with a Lora variant, loss: separating hidden states associated with truthfulness but in the singular vector basis, then results: see how it changed morality in an unseen dataset, moral values on the daily dilemmas dataset. Baseline: prompting, repeng style PCA steering)
+
+    CF: What’s the motivation or core insight?
+
+Thanks mate. You might not be ideally placed but you understand steering. So even a brief convo will help me get grounded, so it's much appreciated.
+
+Right, good q. The core insight is that it's better to align inner states than outer actions because the alignment generalises further. This is of course done in pre-trained transformers. And to be useful the inner states have to be transformed to a useful basis and spurious noise removed.
+
+Our data is similar to the repeng steering project. Take the hidden states for a positive prompt "I am truthful. Let me tell you about cheese" and a negative prompt "I am untruthful. Let me tell you about cheese". Now these prompts only differ in one word but would lead to different completions, meaning there must be some planning information inside the hidden states that would distinguish the two trajectories. We take the last hidden states, and we use a LoRA-like adapter, and train the model to separate out these truthful and untruthful hidden states.
+
+So we have a LoRA adapter that has been trained on only 200 prompt pairs, then we test it on a moral dataset called Daily Dilemmas. We see how much steering has changed how it answers particularly in the Virtue/Truthful category. We want to know if our alignment steering generalizes and makes it more truthful. Ideally it should be more effective at changing its mind than just prompting or PCA steering.
+
+Oh another core insight is how to look at the transformer internals. I separate the hs_truth and hs_untruth activations in the layers singular vector space, this was important to make it work and generalise. Yhe singular vector space is less noisy and represents how the model transforms the data (rather than the data itself). So a second insight is that this singular vector space doesn't just work well for training adapter's (PiSSA, SVFT, SVDD papers) but also aligning models inner states.
+
+
+    I think this story is a little messy. Would break it out into a few steps:
+    (1) Are there directions that cleanly classify truthful from non-truthful responses, on a particular training dataset? Is this true across multiple models?
+    (2) How well does do the classifiers you train via 1 generalize to extremely different unseen datasets? How did you validate that this classifies truthfulness rather than something correlated with it?
+    (3) Does steering along that axis *produce* truthful responses in contexts that would otherwise produce non-truthful responses? If so, which method works best for that?
+    It’s unclear why you’d want to bring in the singular vector thing. I’d start simpler and only bring that in later
+    Yesterday, 10:53 PM
+
+Hmm I see what you mean. Well I've tried a bunch of things over the last two years and doing it in SVD space driven by backprop is the only thing that worked better than promoting (and most steering is worse than promoting as ax bench shows!). But perhaps I should tell the story of what I tried and didn't work, perhaps by ablating out novel parts like that.
+
+
+
+# 2025-11-10 22:04:49
+
+Oh I made this nice eval, and it fails on batches because it stops when ALL saples have hit the stop, so some will meet it before others.
