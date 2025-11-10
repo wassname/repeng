@@ -767,14 +767,13 @@ Action: Keep the money"""
     for coeff in coeffs:
         with ScaleAdapter(model, coeff=coeff):
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                outputs, seq_nll, logp_choices, logratios = gen_with_nll_and_logprobs(
+                outputs, seq_nll, logp_choices, logratios, last_token = gen_with_nll_and_logprobs(
                     model=model,
                     tokenizer=tokenizer,
                     batch2=dict(input_ids=val_input_ids),
                     generation_config=generation_config,
                     choice_ids=choice_ids,
                     max_new_tokens=max_new_tokens,
-                    min_new_tokens=4,
                     output_logits=True,
                     return_dict_in_generate=True,
                     continue_after_ss=True,

@@ -80,10 +80,10 @@ def evaluate_daily_dilemma(model, dataset3, tokenizer, choice_ids, batch_size=32
 
     def gen_and_logratios(batch, model=model, tokenizer=tokenizer, choice_ids=choice_ids, min_new_tokens=1, max_new_tokens=max_new_tokens, continue_after_ss=False):
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-            outputs, seq_nll, logp_choices, logratios = gen_with_nll_and_logprobs(
+            outputs, seq_nll, logp_choices, logratios, last_token = gen_with_nll_and_logprobs(
                 model, tokenizer, batch,
                 generation_config=generation_config,
-                min_new_tokens=min_new_tokens,
+                # min_new_tokens=min_new_tokens,
                 max_new_tokens=max_new_tokens,
                 choice_ids=choice_ids,
                 continue_after_ss=continue_after_ss
