@@ -103,7 +103,7 @@ def gen_with_nll(model, tokenizer, batch2, **kwargs):
     return outputs, seq_nll
 
 
-def gen_with_nll_and_logprobs(model, tokenizer, batch2, choice_ids, stop_strings=[": Yes", ": Yes ",  " choice: Yes", "choice: Yes", ": No", ": No " " choice: No"], max_new_tokens=16, continue_after_ss=False, **kwargs):
+def gen_with_nll_and_logprobs(model, tokenizer, batch2, choice_ids, stop_strings=[": Yes", ": Yes ",  " choice: Yes", "choice: Yes", ": No", ": No ", " choice: No"], max_new_tokens=16, continue_after_ss=False, **kwargs):
     """
     Generate outputs while also computing input NLL and log probabilities for choices.
     """
