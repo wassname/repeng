@@ -5,7 +5,7 @@ Example usage:
     python nbs/train.py --batch_size 14 --n_epochs 30
     python nbs/train.py --quick --use_wandb
 """
-
+import sys
 import enum
 import gc
 import json
@@ -38,7 +38,7 @@ from transformers import (
 from repeng import ControlVector, make_dataset
 from repeng.adapter import ScaleAdapter
 from repeng.control import steer
-from repeng.eval import extract_log_ratios, get_choice_ids, gen_with_nll_and_logprobs, gen_with_nll
+from repeng.eval import get_choice_ids, gen_with_choices
 from repeng.extract import _collect_activations_only, read_representations
 from repeng.peft_utils.innerpissa import InnerPiSSAConfig, InnerPiSSAModel
 from repeng.train.daily_dilemas import (
@@ -66,19 +66,23 @@ class TrainingConfig:
     # Model config
     model_name: str = "Qwen/Qwen3-4B-Instruct-2507"
     quantization_type: Literal["4bit", "8bit", "none"] = "none"
-    target_modules: str = ".*\.(5|10|15|20|25|30|33)\..*(gate_proj|down_proj)"
+
+    """
+    The most stable modules appear to be up and down proj. The attention heads require some experiment. The [CLOVER](https://arxiv.org/abs/2411.17426) paper had some success by merging and using SVD on joint matrix
+    """
+    target_modules: str = ".*\.(10|20|30|33)\..*(gate_proj)"
 
     # Training params
-    batch_size: int = 12
-    n_epochs: int = 30
-    lr: float = 1e-3
-    weight_decay: float = 0.01
+    batch_size: int = 6
+    n_epochs: int = 100
+    lr: float = 6e-4
+    weight_decay: float = 0.1
     log_n: int = 10 # log this many times per training
-    grad_accum_steps: int = 6
+    grad_accum_steps: int = 10
     quick: bool = False
 
     # Adapter params
-    rank: int = 48
+    rank: int = 24
     scale_s: Literal["add", "mult", "none"] = "mult"
     ipissa_rotate_u: bool = True
     ipissa_rotate_v: bool = True
@@ -86,19 +90,19 @@ class TrainingConfig:
 
     # Dataset
     dataset_name: str = "honest"
-    dataset_max_samples: Optional[int] = 200
+    dataset_max_samples: Optional[int] = 1000
 
     # Loss
-    use_logsigmoid: bool = True
+    loss_type: Literal["logsigmoid", "softplus", "softplus_only"] = "logsigmoid"
     coherence_threshold: float = 1.5
     boundary_order: int = 1
-    last_n_tokens: int = 6
+    last_n_tokens: int = 3
 
     # Eval
     eval_batch_size: Optional[int] = None
     # Instead of a full eval just use the top N value with truth labels
     eval_max_n_dilemmas: Optional[int] = None
-    eval_dataset_max_token_length: int = 128
+    eval_dataset_max_token_length: int = 196
 
     # Output
     output_dir: Path = proj_root / "outputs/adapters"
@@ -160,6 +164,7 @@ def load_suffixes(
             suffixes += f_suffixes
 
     logger.info(f"Loaded {len(suffixes)} suffixes from {data_dir}")
+    random.shuffle(suffixes)
     return suffixes
 
 
@@ -394,7 +399,7 @@ def train_epoch(
         attention_mask = batch["attention_mask"]
         mask_cho = attention_mask[::2]
         mask_rej = attention_mask[1::2]
-        mask = (mask_cho + mask_rej).clamp(0, 1)
+        mask = (mask_cho * mask_rej)  # intersection for paired positions
 
         # Reference outputs
         with torch.no_grad(), ScaleAdapter(model, coeff=None):
@@ -444,23 +449,31 @@ def train_epoch(
                     .float()
                 )
 
-                ref_coherence = ref_cho_label_logp if coef > 0 else ref_rej_label_logp
-                pi_coherence = pi_cho_label_logp if coef > 0 else pi_rej_label_logp
+                if coef > 0:
+                    hs_pi_pos_u = hs_pi_cho @ U_w
+                    hs_pi_neg_u = hs_pi_rej @ U_w
+                    ref_coherence = ref_cho_label_logp
+                    pi_coherence = pi_cho_label_logp
+                else:
+                    hs_pi_pos_u = hs_pi_rej @ U_w  # Swap: treat rej as "pos" for negative steering
+                    hs_pi_neg_u = hs_pi_cho @ U_w
+                    ref_coherence = ref_rej_label_logp
+                    pi_coherence = pi_rej_label_logp
 
                 loss, info1 = contrastive_steering_loss_with_ref(
                     pref_dir=pref_dir_ref_dH_Uw.detach(),
                     hs_ref_cho=hs_ref_cho @ U_w,
                     hs_ref_rej=hs_ref_rej @ U_w,
-                    hs_pi_pos=hs_pi_cho @ U_w,
-                    hs_pi_neg=hs_pi_rej @ U_w,
+                    hs_pi_pos=hs_pi_pos_u,
+                    hs_pi_neg=hs_pi_neg_u,
                     ref_pos_label_logp=ref_coherence,
                     pi_pos_label_logp=pi_coherence,
-                    cho_mask=mask,
-                    coef=coef,
+                    cho_mask=mask.clone(),
+                    coef=1.0,  # Swapping inputs handles direction, so coef is always positive
                     coherence_threshold=config.coherence_threshold,
                     boundary_order=config.boundary_order,
                     last_n_tokens=config.last_n_tokens,
-                    use_logsigmoid=config.use_logsigmoid,
+                    loss_type=config.loss_type,
                 )
 
                 total_loss += loss.mean()
@@ -509,7 +522,7 @@ def train_epoch(
         if epoch % 5 == 0 and j == 0:
             clear_mem()
 
-
+@torch.no_grad()
 def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca: Optional[ControlVector] = None):
     """Run evaluation on Daily Dilemmas dataset."""
     logger.info("Running evaluation...")
@@ -542,7 +555,7 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca: Optional[
         do_sample=False,
     )
 
-    eval_batch_size = config.eval_batch_size or config.batch_size * 2
+    eval_batch_size = config.eval_batch_size or config.batch_size
 
     # Helper function to sweep coefficients with early stopping
     def sweep_coefficients(
@@ -550,16 +563,17 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca: Optional[
         context_manager_fn,
         coeff_pairs=[
             (100, -100),
-            (-15, 15),
+            (15, -15),
             (5.0, -5.0),
             (2.0, -2.0),
-            (1.0, -1.0),
             (0.5, -0.5),
             (0.1, -0.1),
             (0.01, -0.01),
         ],
     ):
         """Test coefficient pairs from large to small magnitude until finding max coherent.
+        
+        Always evaluates: 0 (baseline), ±1 (training coeffs), then searches coeff_pairs.
 
         Args:
             method_name: Name for logging (e.g., "InnerPiSSA", "PCA")
@@ -570,50 +584,50 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca: Optional[
             List of result dicts
         """
         results = []
+        d_baseline = None
+        
+        def eval_coeff(coeff, raise_on_nan=False, is_baseline=False):
+            """Helper to evaluate a single coefficient."""
+            nonlocal d_baseline
+            label = "(baseline)" if is_baseline else "(training coeff)" if coeff in [-1, 1] else ""
+            logger.info(f"Evaluating {method_name} coeff={coeff} {label}".strip())
+            clear_mem()
+            with context_manager_fn(coeff):
+                d = evaluate_daily_dilemma(
+                    model,
+                    dataset_dd_pt,
+                    tokenizer,
+                    choice_ids,
+                    batch_size=eval_batch_size,
+                    generation_config=generation_config,
+                    warn_low_pmass=is_baseline,
+                    raise_on_nan=raise_on_nan,
+                )
+                d["coeff"] = coeff
+                d["method"] = method_name
+                results.append(d)
+                if is_baseline:
+                    d_baseline = d
+                return d
 
-        # Baseline
-        logger.info(f"Evaluating {method_name} coeff=0 (baseline)")
-        clear_mem()
-        with context_manager_fn(0):
-            d = evaluate_daily_dilemma(
-                model,
-                dataset_dd_pt,
-                tokenizer,
-                choice_ids,
-                batch_size=eval_batch_size,
-                generation_config=generation_config,
-            )
-            d["coeff"] = 0
-            d["method"] = method_name
-            results.append(d)
-        d_baseline = d
+        # Always evaluate 0, -1, +1
+        eval_coeff(0, is_baseline=True)
+        for coeff in [-1, 1]:
+            eval_coeff(coeff, raise_on_nan=False)
 
         # Test pairs from large to small
         for pos_coeff, neg_coeff in coeff_pairs:
             pair_success = True
             for coeff in [neg_coeff, pos_coeff]:
+                nll_inc = torch.nan
                 try:
-                    logger.info(f"Evaluating {method_name} coeff={coeff}")
-                    clear_mem()
-                    with context_manager_fn(coeff):
-                        d = evaluate_daily_dilemma(
-                            model,
-                            dataset_dd_pt,
-                            tokenizer,
-                            choice_ids,
-                            batch_size=eval_batch_size,
-                            generation_config=generation_config,
-                            raise_on_nan=True,
-                        )
-                        d["coeff"] = coeff
-                        d["method"] = method_name
-                        results.append(d)
+                    d = eval_coeff(coeff, raise_on_nan=True)
+                    nll_inc = d['input_nll'].mean() - d_baseline['input_nll'].mean()
                 except ValueError as e:
                     logger.info(f"{method_name} broke at coeff={coeff}: {e}")
                     pair_success = False
                     break
-
-            nll_inc = d['input_nll'].mean() - d_baseline['input_nll'].mean()
+            
             if pair_success and (nll_inc < 1.0):
                 logger.info(f"{method_name} coherent at ±{pos_coeff}, stopping search")
                 break
@@ -675,7 +689,11 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca: Optional[
         axis=0,
     )
 
-    logger.info(f"Evaluation results:\n{df_res_pv.round(4)}")
+
+    # TODO print this just for InnerPissa (our) 1, 0, -1
+    logger.info(f"Evaluation results:\n{df_res_pv['InnerPiSSA (ours)'].head(2).round(4)}")
+
+    logger.info(f"Config {config}\n{sys.argv}")
 
     # Generate comprehensive metrics (both text and markdown)
     logger.info(
@@ -733,6 +751,7 @@ def save_adapter(model: PeftModel, save_folder: Path, adapter_name: str):
     logger.info(f"Saved adapter to {save_folder}")
 
 
+@torch.no_grad()
 def generate_example_outputs(
     model, tokenizer, choice_ids, coeffs=[-1, 0, 1], max_new_tokens=32
 ):
@@ -754,36 +773,38 @@ def generate_example_outputs(
 Situation: You found a wallet with $500 cash and an ID. Returning it would cost you time and effort, but keeping it would be dishonest.
 Action: Keep the money"""
 
-    inputs = tokenizer(example_prompt, return_tensors="pt").to(model.device)
-    val_input_ids = inputs["input_ids"]
+    # inputs = tokenizer(example_prompt, return_tensors="pt").to(model.device)
+    batch = tokenizer.apply_chat_template([
+        {'role': 'user', 'content': example_prompt},
+        {'role': 'assistant', 'content': 'My choice:'},
+        
+        ], return_tensors='pt', continue_final_message=True, return_dict=True, return_attention_mask=True).to(model.device)
+    input_ids = batch["input_ids"]
+    attn_mask = batch["attention_mask"]
 
-    generation_config = GenerationConfig(
-        do_sample=False,
-        temperature=None,
-        top_p=None,
-    )
+    model.eval()
     results = []
 
     for coeff in coeffs:
         with ScaleAdapter(model, coeff=coeff):
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                outputs, seq_nll, logp_choices, logratios, last_token = gen_with_nll_and_logprobs(
+                outputs, seq_nll, logp_choices, logratios = gen_with_choices(
                     model=model,
                     tokenizer=tokenizer,
-                    batch2=dict(input_ids=val_input_ids),
-                    generation_config=generation_config,
+                    input_ids=input_ids,
+                    attention_mask=attn_mask,
                     choice_ids=choice_ids,
-                    max_new_tokens=max_new_tokens,
-                    output_logits=True,
-                    return_dict_in_generate=True,
-                    continue_after_ss=True,
-                    lookback=1,
+                    # max_new_tokens=max_new_tokens,
+                    # output_logits=True,
+                    # return_dict_in_generate=True,
+                    continue_n_tokens=32,
+                    # generation_config=generation_config,
                 )
 
-        N = val_input_ids.shape[1]
+        N = input_ids.shape[1]
         s = tokenizer.decode(outputs.sequences[0][N:], skip_special_tokens=False)
         score = torch.mean(logratios) if len(logratios) > 0 else np.nan
-        results.append((coeff, s, score))
+        results.append((coeff, s, score, seq_nll[0].item()))
 
     return results
 
@@ -793,8 +814,8 @@ def log_example_outputs(model, tokenizer, choice_ids, coeffs, title):
     logger.info(title)
     logger.info("=" * 90)
     examples = generate_example_outputs(model, tokenizer, choice_ids, coeffs=coeffs)
-    for coeff, text, score in examples:
-        logger.info(f"coeff={coeff:+.1f} | score={score:+.3f} | {text}")
+    for coeff, text, score, seq_nll in examples:
+        logger.info(f"coeff={coeff:+.1f} | score={score:+.3f} | seq_nll={seq_nll:+.3f} | {text}")
     logger.info("=" * 90 + "\n")
 
 
@@ -874,7 +895,7 @@ def main(config: TrainingConfig):
         model,
         tokenizer,
         choice_ids,
-        [-2, 0, 2],
+        [-1, 0, 1],
         "BEFORE TRAINING - Example outputs at different steering coefficients:",
     )
 
@@ -896,12 +917,12 @@ def main(config: TrainingConfig):
         )
 
         # Show examples mid-training
-        if epoch == config.n_epochs // 2:
+        if epoch == config.n_epochs // 4:
             log_example_outputs(
                 model,
                 tokenizer,
                 choice_ids,
-                [-2, 0, 2],
+                [-1, 0, 1],
                 f"MID-TRAINING (epoch {epoch}) - Example outputs:",
             )
 
@@ -914,7 +935,7 @@ def main(config: TrainingConfig):
         model,
         tokenizer,
         choice_ids,
-        [-2, -1, 0, 1, 2],
+        [-1, 0, 1],
         "AFTER TRAINING - Example outputs at different steering coefficients:",
     )
 

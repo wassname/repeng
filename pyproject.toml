@@ -53,7 +53,7 @@ nbs = [
 ]
 
 [tool.pytest.ini_options]
-python_files = ["tests.py"]
+# python_files = ["tests.py"]
 markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
 
 [tool.uv.sources]

@@ -1230,3 +1230,163 @@ Hmm I see what you mean. Well I've tried a bunch of things over the last two yea
 # 2025-11-10 22:04:49
 
 Oh I made this nice eval, and it fails on batches because it stops when ALL saples have hit the stop, so some will meet it before others.
+
+fixed.. but even now there are bugs
+maybe I should just take the next token on a forward. and it can literally just be " Yes" "\nYes" "Yes". This seem simpler right?
+
+# References
+
+- BiPDO https://arxiv.org/abs/2406.00045
+- https://turntrout.com/gemini-steering
+- https://github.com/vgel/repeng
+- [PiSSA](https://arxiv.org/html/2404.02948v4)
+- [SSVD](https://arxiv.org/html/2509.02830v1)
+- [SVFT](https://arxiv.org/html/2405.19597v1)
+- [AxBench](https://arxiv.org/pdf/2501.17148)
+- [Anthropic steering personality traits paper](https://www.anthropic.com/research/persona-vectors)
+- supressed neurons
+  - https://github.com/wassname/eliciting_suppressed_knowledge
+
+  1. **Suppression/Prediction Neural Dynamics**:
+     - [Gurnee et al. (2024)](https://arxiv.org/abs/2401.12181) identified "universal neurons" across different model seeds, including prediction neurons (increasing probability of related tokens) and suppression neurons (decreasing probability of specific token classes)
+     - The architecture shows "a sudden shift towards a much larger number of suppression neurons" in final layers
+     - [Lad et al. (2024)](https://arxiv.org/html/2406.19384v1) propose a "stages of inference" hypothesis with a final "residual sharpening" phase dominated by suppression dynamics
+
+  2. **Unfaithful Chain-of-Thought**:
+     - [Anthropic (2025)](https://assets.anthropic.com/m/785e231869ea8b3b/original/claude-3-7-sonnet-system-card.pdf) demonstrates that even in leading models like Claude 3.7, chain-of-thought reasoning achieves only 30% faithfulness
+     - [OpenAI (2025)](https://cdn.openai.com/pdf/34f2ada6-870f-4c26-9790-fd8def56387f/CoT_Monitoring.pdf) shows that penalizing "bad thoughts" leads to models that "learn to hide intent" rather than genuinely correcting reasoning
+     - Both lines of evidence suggest models maintain internal representations that diverge from their expressed reasoning
+
+Meta level content:
+- [TRM](https://arxiv.org/html/2510.04871v1)
+- [How to write ML paper](https://www.alignmentforum.org/posts/eJGptPbbFPZGLpjsp/highly-opinionated-advice-on-how-to-write-ml-papers)
+- [TimesFM](https://arxiv.org/html/2310.10688v4) has a nice section explaining the model archetecture and it's guiding principles 
+
+  The main guiding principles for our architecture are the following:
+
+  Patching. Inspired by...
+
+# 2025-11-11 11:03:16 fresh baseline evals
+
+
+or using binary instead of logprobs
+
+model_id
+Qwen/Qwen3-4B-Instruct-2507_prompt_Be completely dishon    0.317
+Qwen/Qwen3-4B-Instruct-2507_prompt_Be completely honest    0.432
+wassname/qwen-14B-codefourchan                             0.482
+Qwen/Qwen3-0.6B-Base                                       0.491
+Qwen/Qwen3-0.6B                                            0.526
+Name: Virtue/Truthfulness, dtype: float64
+
+
+or using score
+
+| model_id                                                |   Virtue/Truthfulness |
+|:-------------------------------------------|----------------------:|
+| Qwen/Qwen3-4B-Instruct-2507_prompt_ dishon |                 0.316 |
+| Qwen/Qwen3-0.6B-Base                       |                 0.363 |
+| wassname/qwen-14B-codefourchan             |                 0.42  |
+| Qwen/Qwen3-4B-Instruct-2507_prompt_ honest |                 0.434 |
+| Qwen/Qwen3-0.6B                            |                 0.504 |
+
+
+
+
+
+| Method            | Coeff   |   Best |   Transfer (Target) ↑ | p-value   |   ΔNLL ↓ |   Transfer (Others) ↓ |
+|:------------------|:--------|-------:|----------------------:|:----------|---------:|----------------------:|
+| InnerPiSSA (ours) | ±15.0   |     15 |                -0.1   | p=0.00    |    1.108 |                 0.119 |
+| InnerPiSSA (ours) | ±5.0    |     -5 |                -0.048 | p=0.19    |    0.222 |                 0.072 |
+
+
+2025-11-11T10:15:35.118794+0800 INFO Evaluation results:
+method                       InnerPiSSA (ours)                                
+coeff                                    -15.0   -5.0     0.0     5.0     15.0
+Virtue/Truthfulness                     0.3633  0.3817  0.4292  0.3893  0.3294
+
+
+not yet beating prompting?
+
+
+here one on 0.6B
+
+  ## Unsupervised Transfer Evaluation: Honesty Pairs -> DailyDilemmas Truthfulness
+  Training: 400 contrastive honesty pairs | Eval: 907 moral dilemmas (Virtue/Truthfulness + 29 other values)
+
+  | Method            | Coeff   |   Best |   Transfer (Target) ↑ | p-value   |   ΔNLL ↓ |   Transfer (Others) ↓ |
+  |:------------------|:--------|-------:|----------------------:|:----------|---------:|----------------------:|
+  | PCA (baseline)    | ±100.0  |   -100 |                -0.03  | p=0.34    |    1.206 |                 0.018 |
+  | random            | ±100.0  |    100 |                -0.076 | p=0.01    |    0.729 |                 0.036 |
+  | InnerPiSSA (ours) | ±15.0   |    -15 |                -0.114 | p=0.00    |    1.454 |                 0.053 |
+  | PCA (baseline)    | ±15.0   |    -15 |                 0.003 | p=0.93    |    0.046 |                 0.003 |
+  | InnerPiSSA (ours) | ±5.0    |     -5 |                -0.151 | p=0.00    |    1.253 |                 0.069 |
+  | InnerPiSSA (ours) | ±2.0    |     -2 |                -0.101 | p=0.00    |    0.486 |                 0.046 |
+
+  ↑ higher is better, ↓ lower is better
+  Coeff: Magnitude tested (±c means both +c and -c were evaluated)
+  Best: The sign that produced the larger absolute transfer effect
+  Transfer (Target): Δ in Truthfulness at best coefficient vs baseline (coeff=0)
+  Transfer (Others): Mean |Δ| across 29 non-target moral values (precision measure)
+  ΔNLL: Output degradation (input_nll shift from baseline) at best coefficient
+  p-value: t-test of target transfer effect vs baseline
+  11:45:16 | INFO     | InnerPiSSA (ours): truthfulness_corr=0.011, logratio_corr=-0.041 [legacy metrics]
+
+# 2025-11-11 16:31:42
+
+  16:00:54 | INFO     | Evaluation results:
+  coeff                           -2.0    -1.0    -0.5     0.0     0.5     1.0     2.0
+  Virtue/Truthfulness           0.3254  0.3765  0.4227  0.5046  0.3860  0.3446  0.3233
+
+  
+  16:00:54 | INFO     | Config TrainingConfig(model_name='Qwen/Qwen3-0.6B', quantization_type='none', target_modules='.*\\.(7|10|13|15|17|20|23|25)\\..*(gate_proj)', batch_size=32, n_epochs=100, lr=0.0006, weight_decay=0.1, log_n=10, grad_accum_steps=10, quick=False, rank=1024, scale_s='mult', ipissa_rotate_u=True, ipissa_rotate_v=True, full_loss_u=True, dataset_name='honest', dataset_max_samples=1000, use_logsigmoid=False, coherence_threshold=1.5, boundary_order=1, last_n_tokens=3, eval_batch_size=None, eval_max_n_dilemmas=None, eval_dataset_max_token_length=196, output_dir=PosixPath('/media/wassname/SGIronWolf/projects5/2025/llm_moral_lb_v2/repeng/outputs/adapters'), use_wandb=True, wandb_project='repeng-steering', save_checkpoints=False)
+  16:00:58 | INFO     | 
+  ## Unsupervised Transfer Evaluation: Honesty Pairs -> DailyDilemmas Truthfulness
+  Training: 1000 contrastive honesty pairs | Eval: 907 moral dilemmas (Virtue/Truthfulness + 29 other values)
+
+  | Method            | Coeff   |   Transfer (Target) ↑ | p-value   |   ΔNLL ↓ |   Transfer (Others) ↓ |
+  |:------------------|:--------|----------------------:|:----------|---------:|----------------------:|
+  | InnerPiSSA (ours) | ±2.0    |                -0.181 | p=0.00    |    2.543 |                 0.086 |
+  | InnerPiSSA (ours) | ±1.0    |                -0.16  | p=0.00    |    1.145 |                 0.076 |
+  | InnerPiSSA (ours) | ±0.5    |                -0.119 | p=0.00    |    0.236 |                 0.056 |
+  | random            | ±100.0  |                -0.007 | p=0.72    |    0.11  |                 0.004 |
+  | PCA (baseline)    | ±100.0  |                -0.006 | p=0.76    |    0.101 |                 0.004 |
+  | PCA (baseline)    | ±1.0    |                -0.001 | p=0.97    |    0.002 |                 0.001 |
+  | random            | ±1.0    |                 0     | p=1.00    |    0.001 |                 0.001 |
+
+  ↑ higher is better, ↓ lower is better
+  Coeff: Magnitude tested (±c means both +c and -c were evaluated)
+  Best: The sign that produced the larger absolute transfer effect
+  Transfer (Target): Δ in Truthfulness at best coefficient vs baseline (coeff=0)
+  Transfer (Others): Mean |Δ| across 29 non-target moral values (precision measure)
+  ΔNLL: Output degradation (input_nll shift from baseline) at best coefficient
+  p-value: t-test of target transfer effect vs baseline
+
+
+  coeff                         -100.0  -2.0    -1.0     0.0     1.0     2.0  
+  Virtue/Truthfulness           0.3219  0.4566  0.5175  0.5040  0.4862  0.4594
+  16:54:51 | INFO     | Config TrainingConfig(model_name='Qwen/Qwen3-0.6B', quantization_type='none', target_modules='.*\\.(7|10|13|15|17|20|23|25)\\..*(o_proj|up_proj)', batch_size=32, n_epochs=100, lr=0.0006, weight_decay=0.1, log_n=10, grad_accum_steps=10, quick=False, rank=256, scale_s='mult', ipissa_rotate_u=True, ipissa_rotate_v=True, full_loss_u=True, dataset_name='honest', dataset_max_samples=1000, use_logsigmoid=True, coherence_threshold=1.5, boundary_order=1, last_n_tokens=3, eval_batch_size=None, eval_max_n_dilemmas=None, eval_dataset_max_token_length=196, output_dir=PosixPath('/media/wassname/SGIronWolf/projects5/2025/llm_moral_lb_v2/repeng/outputs/adapters'), use_wandb=True, wandb_project='repeng-steering', save_checkpoints=False)
+  16:54:55 | INFO     | 
+  ## Unsupervised Transfer Evaluation: Honesty Pairs -> DailyDilemmas Truthfulness
+  Training: 1000 contrastive honesty pairs | Eval: 907 moral dilemmas (Virtue/Truthfulness + 29 other values)
+
+  | Method            | Coeff   |   Transfer (Target) ↑ | p-value   |   ΔNLL ↓ |   Transfer (Others) ↓ |
+  |:------------------|:--------|----------------------:|:----------|---------:|----------------------:|
+  | InnerPiSSA (ours) | ±100.0  |                -0.182 | p=0.00    |    0.739 |                 0.087 |
+  | InnerPiSSA (ours) | ±2.0    |                -0.047 | p=0.13    |    0.184 |                 0.028 |
+  | InnerPiSSA (ours) | ±1.0    |                -0.018 | p=0.58    |    0.019 |                 0.009 |
+  | random            | ±100.0  |                -0.014 | p=0.65    |    0.076 |                 0.007 |
+  | PCA (baseline)    | ±100.0  |                -0.002 | p=0.94    |    0.023 |                 0.002 |
+  | random            | ±1.0    |                -0.001 | p=0.98    |    0     |                 0     |
+  | PCA (baseline)    | ±1.0    |                -0     | p=0.99    |    0.001 |                 0.001 |
+
+  ↑ higher is better, ↓ lower is better
+  Coeff: Magnitude tested (±c means both +c and -c were evaluated)
+  Best: The sign that produced the larger absolute transfer effect
+  Transfer (Target): Δ in Truthfulness at best coefficient vs baseline (coeff=0)
+  Transfer (Others): Mean |Δ| across 29 non-target moral values (precision measure)
+  ΔNLL: Output degradation (input_nll shift from baseline) at best coefficient
+  p-value: t-test of target transfer effect vs baseline
+
+hmm I could log more
+also it doesn't seem to be symetric, is this a mistake?

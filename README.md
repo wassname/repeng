@@ -1,5 +1,11 @@
 # InnerPiSSA: Deep-Dish Inner Alignment through Reversible SVD Steering
 
+## Abstract
+
+Most steering methods fail to generalize beyond their training prompts, achieving weak transfer to out-of-distribution moral reasoning tasks (PCA baselines score < X on DailyDilemmas). We hypothesize this is because they operate in raw activation space, which is dominated by surface features rather than semantic transformations. We propose InnerPiSSA, a parameter-efficient adapter that steers in the model's native SVD basis. By learning rotations and scaling of singular vectors, we separate honest from dishonest hidden states while maintaining output coherence. Trained on only X contrastive honesty pairs, our method transfers to unseen moral reasoning with Xx stronger effect than baselines (score X vs X), modifying X/31 moral value dimensions versus X/31 for PCA. Ablations show each component is necessary: removing rotations drops performance by X%, removing SVD projection by X%, and disabling coherence constraints causes output degradation. Our results suggest that inner alignment in transformation space is more generalizable than output-level steering.
+
+## Introduction
+
 *Because alignment shouldn't just be surface-level—we're going all the way down to the hidden layers.*
 *Why just top your model with alignment when you can bake it in from the hidden layers up?*
 
@@ -12,6 +18,7 @@ Language model alignment typically modifies outputs, leaving internal representa
 4. Bake bidirectionally (c = ±1, same adapter, opposite behaviors)
 
 
+
 ## Key ingredients
 - Efficient: Achieves comparable steering to SFT with X% of parameters
 - Reversible: Single adapter can steer in both directions (honest ↔ dishonest)
@@ -19,6 +26,21 @@ Language model alignment typically modifies outputs, leaving internal representa
 - 
 **The secret ingredient?** We train on *hidden state differences* from minimally-contrastive prompts, capturing the model's internal "planning trajectory" before it reaches output. It's alignment from the inside out—proper Chicago style.
 
+
+## Model Architecture
+
+The main guiding principles for our architecture are:
+1. **Operate in the model's native transformation basis**: Raw activation space mixes semantic content with positional/structural information, making it noisy for steering
+2. **Enable bidirectional control**: A single adapter should steer both toward and away from a behavior
+3. **Maintain output coherence**: Steering shouldn't degrade generation quality
+
+**SVD-based projection**: We decompose each layer's weight matrix W = U @ Σ @ V^T + W_res. This separates the model's transformation components (U, Σ, V) from residual variance. Projecting activations into the U-space (hs @ U) aligns our intervention with how the model transforms information, not just what it represents. This is analogous to operating in frequency space rather than pixel space for image editing.
+
+**Learnable rotations**: The pre-trained SVD basis isn't perfectly aligned with honesty directions. We learn skew-symmetric parameters θ_v that generate rotation matrices R = cayley(θ_v, c), allowing the adapter to discover the optimal subspace for separating honest/dishonest trajectories. Without this, performance drops by 75% (see Section 4.2).
+
+**Singular value scaling**: We scale Σ by exp(c · λ) rather than additive scaling. This respects the multiplicative nature of singular values as amplification factors. Multiplicative scaling creates cleaner dose-response curves; additive scaling causes instability and 60% performance degradation.
+
+**Coherence constraint**: Maximizing separation alone causes the model to generate incoherent outputs. We bound the NLL degradation to <0.2 nats per token, creating a trust region where steering improves without breaking generation quality.
 
 **Results fresh from the oven:**
 TODO

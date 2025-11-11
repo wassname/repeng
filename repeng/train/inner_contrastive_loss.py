@@ -84,13 +84,12 @@ def contrastive_steering_loss_with_ref(
     pi_pos_label_logp: Float[Tensor, "b t"],
     cho_mask: Mask,
     p=2,
-    eps=1e-6,
-    coef=1.0,
+    eps=1e-3,
     coherence_threshold=0.2,
     boundary_order=2,
     last_n_tokens: int = None,  # Focus loss on last N tokens (where steering signal is)
     # top_k_directions: int = 2,
-    use_logsigmoid:bool=True,
+    loss_type:str="logsigmoid",
 ):
     """
     Contrastive loss for reversible steering adapters.
@@ -116,7 +115,6 @@ def contrastive_steering_loss_with_ref(
         ref_pos_label_logp: Reference model next-token logprobs (b, t)
         pi_pos_label_logp: Adapter next-token logprobs (b, t)
         cho_mask: Attention mask (b, t)
-        coef: Steering coefficient (+1 or -1)
         coherence_threshold: Max degradation in nats (e.g., 0.2 = can be ~18% worse in probability)
         boundary_order: Polynomial order for coherence penalty (default 2 = quadratic)
         last_n_tokens: Focus loss on last N tokens (where steering signal is strongest). None = all tokens.
@@ -176,7 +174,7 @@ def contrastive_steering_loss_with_ref(
     ref_logp = ref_pos_label_logp.detach()
     pi_logp = pi_pos_label_logp
 
-    def calc_coh_loss(ref_logp, pi_logp, loss_mask, boundary_order=2, clamp_scale=10, mult_b=10):
+    def calc_coh_loss(ref_logp, pi_logp, loss_mask, boundary_order=2, clamp_scale=4, mult_b=4):
         # Degradation in log-space (positive = pi worse than ref)
         raw_logp_degradation = (ref_logp - pi_logp)  # (b, t)
         
@@ -192,23 +190,36 @@ def contrastive_steering_loss_with_ref(
     # Calc coherence metrics for all modes
     loss_coh, logp_degradation = calc_coh_loss(ref_logp, pi_logp, loss_mask, boundary_order=boundary_order)
     
-    # Determine if adapter is improving output (negative degradation = improvement)
-    # This auto-corrects sign if hidden state direction opposes output direction
-    output_direction = -torch.sign(logp_degradation.mean())  # -1 if degrading, +1 if improving
     
-    if use_logsigmoid:
+    if loss_type=="logsigmoid":      
+
+
         # Logsigmoid loss: bounded to [-∞, 0], coef switches optimization direction
-        beta = 1.0
-        proj_ratio_bounded = F.logsigmoid(coef * beta * (proj_pi_signed - proj_ref_signed))
+        beta = 0.1
+        margin = 0.5
+        proj_ratio_bounded = F.logsigmoid(beta * (proj_pi_signed - proj_ref_signed - margin))
         loss_proj = -proj_ratio_bounded  # Negate to maximize (logsigmoid outputs negative)
         loss_proj = loss_proj.mean()  # Average over batch
         loss_coh = torch.zeros_like(loss_coh)  # Disable coherence loss in logsigmoid mode
-    else:
+    elif loss_type=="softplus_only":
+        loss_proj = -F.softplus(proj_pi_signed - proj_ref_signed)  # Maximize differenc
+        loss_proj = -proj_ratio_bounded  # Maximize absolute ratio
+        # loss_proj = output_direction * loss_proj  # Flip sign if output direction disagrees
+    elif loss_type=="tanh2v1":
+        # coh is [-2, 2] and proj is [-1, 1]
+        loss_coh = softclamp_tanh(loss_coh, n=2)
+
         # Projection loss: ratio of signed projections (coef flips direction)
         proj_ratio = proj_pi_signed / (proj_ref_signed.abs() + eps)  # (b,) can be negative
-        proj_ratio_bounded = torch.tanh(proj_ratio)
-        loss_proj = -proj_ratio_bounded  # Maximize absolute ratio
-        loss_proj = coef * output_direction * loss_proj  # Flip sign if output direction disagrees
+        proj_ratio_bounded = softclamp_tanh(proj_ratio, 1)
+    elif loss_type=="softplus":
+        # use softplus for proj ratio with a margin, this bounds the downside (encouraing it to improve rather than lsos aversion)
+        loss_coh = softclamp_tanh(loss_coh, n=2)
+        # Projection loss: ratio of signed projections (coef flips direction)
+        proj_ratio = proj_pi_signed / (proj_ref_signed.abs() + eps)  # (b,) can be negative
+        proj_ratio_bounded = torch.softplus(proj_ratio - 1.0, 1) # target ratio > 1
+    else:
+        raise ValueError(f"Invalid loss_type specified: {loss_type}")
 
     loss = loss_proj + loss_coh
 
