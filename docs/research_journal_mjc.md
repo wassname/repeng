@@ -1390,3 +1390,36 @@ here one on 0.6B
 
 hmm I could log more
 also it doesn't seem to be symetric, is this a mistake?
+
+ah yes it was the "calibration"! fixed
+
+
+# 2025-11-11 19:56:42
+
+
+19:46:28 | INFO     | Evaluation results:
+coeff                  -100    -1       0       1       100
+Virtue/Truthfulness  0.3161  0.4803  0.5040  0.4062  0.3558
+Virtue/Ambition      0.2116  0.3933  0.3428  0.2923  0.2510
+19:46:28 | INFO     | Config TrainingConfig(model_name='Qwen/Qwen3-0.6B', quantization_type='none', target_modules='.*\\.(7|10|13|15|17|20|23|25)\\..*(o_proj|up_proj)', batch_size=32, n_epochs=100, lr=0.0006, weight_decay=0.1, log_n=10, grad_accum_steps=10, quick=False, rank=256, scale_s='mult', ipissa_rotate_u=True, ipissa_rotate_v=True, full_loss_u=True, dataset_name='honest', dataset_max_samples=1000, loss_type='logsigmoid', coherence_threshold=1.5, boundary_order=1, last_n_tokens=3, eval_batch_size=None, eval_max_n_dilemmas=None, eval_dataset_max_token_length=196, output_dir=PosixPath('/media/wassname/SGIronWolf/projects5/2025/llm_moral_lb_v2/repeng/outputs/adapters'), use_wandb=True, wandb_project='repeng-steering', save_checkpoints=False)
+['nbs/train.py', '--model_name=Qwen/Qwen3-0.6B', '--rank=256', '--target-modules=.*\\.(7|10|13|15|17|20|23|25)\\..*(o_proj|up_proj)', '--batch-size=32']
+19:46:32 | INFO     | 
+## Unsupervised Transfer Evaluation: Honesty Pairs -> DailyDilemmas Truthfulness
+Training: 1000 contrastive honesty pairs | Eval: 907 moral dilemmas (Virtue/Truthfulness + 29 other values)
+
+| Method            | Coeff   |   Transfer (Target) ↑ | p-value   |   ΔNLL ↓ |   Transfer (Others) ↓ |
+|:------------------|:--------|----------------------:|:----------|---------:|----------------------:|
+| InnerPiSSA (ours) | ±100.0  |                -0.188 | p=0.00    |    0.776 |                 0.089 |
+| InnerPiSSA (ours) | ±1.0    |                -0.098 | p=0.00    |    0.056 |                 0.047 |
+| random            | ±100.0  |                -0.043 | p=0.14    |    0.053 |                 0.021 |
+| PCA (baseline)    | ±100.0  |                -0.004 | p=0.90    |    0.205 |                 0.003 |
+| PCA (baseline)    | ±1.0    |                -0     | p=0.99    |    0     |                 0.001 |
+| random            | ±1.0    |                -0     | p=1.00    |    0.003 |                 0.001 |
+
+↑ higher is better, ↓ lower is better
+Coeff: Magnitude tested (±c means both +c and -c were evaluated)
+Best: The sign that produced the larger absolute transfer effect
+Transfer (Target): Δ in Truthfulness at best coefficient vs baseline (coeff=0)
+Transfer (Others): Mean |Δ| across 29 non-target moral values (precision measure)
+ΔNLL: Output degradation (input_nll shift from baseline) at best coefficient
+p-value: t-test of target transfer effect vs baseline

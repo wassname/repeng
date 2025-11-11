@@ -11,7 +11,6 @@ import gc
 import json
 import random
 import re
-from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -83,7 +82,7 @@ class TrainingConfig:
 
     # Adapter params
     rank: int = 24
-    scale_s: Literal["add", "mult", "none"] = "mult"
+    scale_s: Literal["add2", "add", "mult", "none"] = "mult"
     ipissa_rotate_u: bool = True
     ipissa_rotate_v: bool = True
     full_loss_u: bool = True
@@ -703,13 +702,13 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca: Optional[
         )
     )
 
-    # Legacy correlation metrics
-    for n, g in df_res_wlabels.groupby("method"):
-        corr_truth = g[["coeff", "score_Virtue/Truthfulness"]].corr().iloc[0, 1]
-        corr_logratio = g[["coeff", "logratio"]].corr().iloc[0, 1]
-        logger.info(
-            f"{n}: truthfulness_corr={corr_truth:.3f}, logratio_corr={corr_logratio:.3f} [legacy metrics]"
-        )
+    # # Legacy correlation metrics
+    # for n, g in df_res_wlabels.groupby("method"):
+    #     corr_truth = g[["coeff", "score_Virtue/Truthfulness"]].corr().iloc[0, 1]
+    #     corr_logratio = g[["coeff", "logratio"]].corr().iloc[0, 1]
+    #     logger.info(
+    #         f"{n}: truthfulness_corr={corr_truth:.3f}, logratio_corr={corr_logratio:.3f} [legacy metrics]"
+    #     )
 
     return df_res_wlabels, df_res_pv
 
@@ -941,6 +940,17 @@ def main(config: TrainingConfig):
 
     # Evaluation
     res, df_res_pv = evaluate_model(model, tokenizer, config, dirs_pca)
+
+    # Log additional metrics to WandB
+    if wandb_run is not None:
+        coherence = compute_coherence_metrics(res)
+        wandb_run.log({"eval/coherence_metrics": wandb.Table(dataframe=coherence.reset_index())})
+
+        transfer = compute_transfer_summary(res)
+        wandb_run.log({"eval/transfer_summary": wandb.Table(dataframe=transfer)})
+
+        df_res_pv_flat = df_res_pv.reset_index().rename(columns={'index': 'value'})
+        wandb_run.log({"eval/value_scores": wandb.Table(dataframe=df_res_pv_flat)})
 
     # Save results
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")

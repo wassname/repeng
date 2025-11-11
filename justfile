@@ -3,16 +3,14 @@
 run:
     #!/bin/bash -x
     . .venv/bin/activate
-
-    CMD='uv run python nbs/train.py  --model_name="Qwen/Qwen3-0.6B" --eval_max_n_dilemmas=64 --target-modules=".*\.(7|10|13|15|17|20|23|25)\..*(gate_proj|down_proj)" --rank=256 --batch-size=32 --lr=6e-4 --weight-decay=0.1'
+    CMD=`uv run python nbs/train.py  --model_name=Qwen/Qwen3-0.6B --eval_max_n_dilemmas=64 --target-modules=".*\.(7|10|13|15|17|20|23|25)\..*(gate_proj|down_proj)" --rank=256 --batch-size=32 --lr=6e-4 --weight-decay=0.1`
 
     # one full run
-
+    $CMD --scale-s=add2
+    $CMD --scale-s=add
     $CMD --loss-type=softplus_only
     $CMD --loss-type=softplus
     $CMD --loss-type=tanh2v1
-    $CMD --scale-s=add
-    $CMD --scale-s=add2
     
 
     uv run python nbs/train.py --model_name="Qwen/Qwen3-0.6B" --rank=256 --target-modules=".*\.(7|10|13|15|17|20|23|25)\..*(o_proj|up_proj)" --batch-size=32
