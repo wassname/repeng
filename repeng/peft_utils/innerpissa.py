@@ -108,7 +108,7 @@ class InnerPiSSALayer(BaseTunerLayer):
     - W_res: Residual matrix (frozen)
     """
 
-    adapter_layer_names = ("ipissa_delta_s", "ipissa_loglambda_s", "ipissa_rotation_params_u", "ipissa_rotation_params_v")
+    adapter_layer_names = ("ipissa_delta_s", "ipissa_rotation_params_u", "ipissa_rotation_params_v")
     other_param_names = ("ipissa_u", "ipissa_v", "ipissa_s", "ipissa_w_res", "ipissa_scale_s", "ipissa_alpha", "ipissa_r", "ipissa_rotate_u", "ipissa_rotate_v", "ipissa_rotation_method", "ipissa_block_size")
 
     peft_type = "INNERPISSA"
@@ -206,7 +206,7 @@ class InnerPiSSALayer(BaseTunerLayer):
         self.ipissa_w_res[adapter_name] = W_res.clone().detach().contiguous()
         
         # Learnable S scaling (modified to be reversible DeLoRA/PiSSA-style)
-        if scale_s == "add":
+        if scale_s in ["add", "add2"]:
             self.ipissa_delta_s[adapter_name] = nn.Parameter(
                 torch.zeros(r, device=device), 
                 requires_grad=True
@@ -342,13 +342,11 @@ class InnerPiSSALayer(BaseTunerLayer):
         
         # Scale S independently (no alpha - this controls magnitude, not direction)
         scale_mode = self.ipissa_scale_s[adapter]
-        if scale_mode == "add":
+        if scale_mode == "add2":
+            delta_s = self.ipissa_delta_s[adapter]
+            S_scaled = S + alpha * delta_s
+        elif scale_mode == "add":
             delta_s = self.ipissa_delta_s[adapter]  # [r]
-            # if steer_s:
-            #     delta_s = delta_s * alpha
-            # S_scaled = S + delta_s
-
-            # OR
             S_scaled = S + alpha * torch.tanh(delta_s) * S
         elif scale_mode == "mult":
             loglambda_s = self.ipissa_loglambda_s[adapter]

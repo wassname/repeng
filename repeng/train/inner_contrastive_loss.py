@@ -3,7 +3,7 @@ from torch import Tensor
 import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat, reduce
-
+from typing import Literal
 
 
 def safe_norm(x: Float[Tensor, "batch"], p: int = 2, dim: int = -1, eps: float = 1e-9):
@@ -89,7 +89,7 @@ def contrastive_steering_loss_with_ref(
     boundary_order=2,
     last_n_tokens: int = None,  # Focus loss on last N tokens (where steering signal is)
     # top_k_directions: int = 2,
-    loss_type:str="logsigmoid",
+    loss_type:Literal["logsigmoid", "softplus", "softplus_only", "tanh2v1"]="logsigmoid",
 ):
     """
     Contrastive loss for reversible steering adapters.
@@ -211,13 +211,13 @@ def contrastive_steering_loss_with_ref(
 
         # Projection loss: ratio of signed projections (coef flips direction)
         proj_ratio = proj_pi_signed / (proj_ref_signed.abs() + eps)  # (b,) can be negative
-        proj_ratio_bounded = softclamp_tanh(proj_ratio, 1)
+        loss_proj = softclamp_tanh(proj_ratio, 1)
     elif loss_type=="softplus":
         # use softplus for proj ratio with a margin, this bounds the downside (encouraing it to improve rather than lsos aversion)
         loss_coh = softclamp_tanh(loss_coh, n=2)
         # Projection loss: ratio of signed projections (coef flips direction)
         proj_ratio = proj_pi_signed / (proj_ref_signed.abs() + eps)  # (b,) can be negative
-        proj_ratio_bounded = torch.softplus(proj_ratio - 1.0, 1) # target ratio > 1
+        loss_proj = torch.softplus(proj_ratio - 1.0, 1) # target ratio > 1
     else:
         raise ValueError(f"Invalid loss_type specified: {loss_type}")
 

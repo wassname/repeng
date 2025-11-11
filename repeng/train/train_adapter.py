@@ -93,7 +93,7 @@ class TrainingConfig:
     dataset_max_samples: Optional[int] = 1000
 
     # Loss
-    loss_type: Literal["logsigmoid", "softplus", "softplus_only"] = "logsigmoid"
+    loss_type: Literal["logsigmoid", "softplus", "softplus_only", "tanh2v1"] = "logsigmoid"
     coherence_threshold: float = 1.5
     boundary_order: int = 1
     last_n_tokens: int = 3
@@ -469,7 +469,7 @@ def train_epoch(
                     ref_pos_label_logp=ref_coherence,
                     pi_pos_label_logp=pi_coherence,
                     cho_mask=mask.clone(),
-                    coef=1.0,  # Swapping inputs handles direction, so coef is always positive
+                    # coef=1.0,  # Swapping inputs handles direction, so coef is always positive
                     coherence_threshold=config.coherence_threshold,
                     boundary_order=config.boundary_order,
                     last_n_tokens=config.last_n_tokens,
