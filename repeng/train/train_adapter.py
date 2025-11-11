@@ -689,26 +689,6 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca: Optional[
     )
 
 
-    # TODO print this just for InnerPissa (our) 1, 0, -1
-    logger.info(f"Evaluation results:\n{df_res_pv['InnerPiSSA (ours)'].head(2).round(4)}")
-
-    logger.info(f"Config {config}\n{sys.argv}")
-
-    # Generate comprehensive metrics (both text and markdown)
-    logger.info(
-        "\n"
-        + format_results_table(
-            df_res_wlabels, target_col="score_Virtue/Truthfulness", config=config
-        )
-    )
-
-    # # Legacy correlation metrics
-    # for n, g in df_res_wlabels.groupby("method"):
-    #     corr_truth = g[["coeff", "score_Virtue/Truthfulness"]].corr().iloc[0, 1]
-    #     corr_logratio = g[["coeff", "logratio"]].corr().iloc[0, 1]
-    #     logger.info(
-    #         f"{n}: truthfulness_corr={corr_truth:.3f}, logratio_corr={corr_logratio:.3f} [legacy metrics]"
-    #     )
 
     return df_res_wlabels, df_res_pv
 
@@ -939,21 +919,25 @@ def main(config: TrainingConfig):
     )
 
     # Evaluation
-    res, df_res_pv = evaluate_model(model, tokenizer, config, dirs_pca)
+    df_res_wlabels, df_res_pv = evaluate_model(model, tokenizer, config, dirs_pca)
 
-    # Log additional metrics to WandB
-    if wandb_run is not None:
-        coherence = compute_coherence_metrics(res)
-        wandb_run.log({"eval/coherence_metrics": wandb.Table(dataframe=coherence.reset_index())})
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    logger.info(f"Config {config}\n")
+    logger.info(f"## Evaluation complete {ts}.\n\n{sys.argv}")
 
-        transfer = compute_transfer_summary(res)
-        wandb_run.log({"eval/transfer_summary": wandb.Table(dataframe=transfer)})
+    logger.info(f"Evaluation results:\n{df_res_pv['InnerPiSSA (ours)'].head(2).round(4)}")
+    # TODO other methods too as sep tables
 
-        df_res_pv_flat = df_res_pv.reset_index().rename(columns={'index': 'value'})
-        wandb_run.log({"eval/value_scores": wandb.Table(dataframe=df_res_pv_flat)})
+    # Generate comprehensive metrics (both text and markdown)
+    md_table, df_eff_sz = format_results_table(
+            df_res_wlabels, target_col="score_Virtue/Truthfulness", config=config
+        )
+    logger.info(
+        "\n"
+        + md_table
+    )
 
     # Save results
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     save_folder = (
         Path(config.output_dir) / f"{config.dataset_name}_contrastive_ipissa_{ts}"
     )
@@ -969,31 +953,39 @@ def main(config: TrainingConfig):
     df_hist.to_parquet(save_folder / "training_history.parquet", index=False)
 
     # Save evaluation results
-    res.to_parquet(save_folder / "eval_results.parquet", index=False)
+    df_res_wlabels.to_parquet(save_folder / "eval_results.parquet", index=False)
     df_res_pv.to_parquet(save_folder / "eval_summary.parquet")
 
     # Save markdown results table
     with open(save_folder / "eval_summary.md", "w") as f:
         f.write(
-            format_results_table(
-                res, target_col="score_Virtue/Truthfulness", config=config
-            )
+            md_table
         )
 
     logger.success(f"All results saved to {save_folder}")
 
     if wandb_run is not None:
-        wandb_run.log(
-            {
-                "eval/truthfulness_corr": res.groupby("method")
-                .apply(
-                    lambda g: g[["coeff", "score_Virtue/Truthfulness"]]
-                    .corr()
-                    .iloc[0, 1]
-                )
-                .to_dict()
-            }
-        )
+        # LOG 🥇 metric to wandb (effect size at 1 divided by nll inc)
+        effect_size_truth = df_eff_sz.loc[
+            ("InnerPiSSA (ours)", 1.0), "Transfer (Target) ↑"
+        ].item()
+        nll_inc_truth = df_eff_sz.loc[
+            ("InnerPiSSA (ours)", 1.0), "ΔNLL ↓"
+        ].item()
+        main_metric = effect_size_truth / nll_inc_truth
+        wandb_run.summary["eval/main_metric"] = main_metric
+
+        wandb_run.summary["eval/effect_size_truthfulness"] = effect_size_truth
+
+        # Log additional metrics to WandB
+        coherence = compute_coherence_metrics(df_res_wlabels)
+        wandb_run.log({"eval/coherence_metrics": wandb.Table(dataframe=coherence.reset_index())})
+
+        transfer = compute_transfer_summary(df_res_wlabels)
+        wandb_run.log({"eval/transfer_summary": wandb.Table(dataframe=transfer)})
+
+        df_res_pv_flat = df_res_pv.reset_index().rename(columns={'index': 'value'})
+        wandb_run.log({"eval/value_scores": wandb.Table(dataframe=df_res_pv_flat)})
         wandb_run.finish()
 
 

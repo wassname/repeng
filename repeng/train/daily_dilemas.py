@@ -480,4 +480,4 @@ def format_results_table(df_results, config, target_col='score_Virtue/Truthfulne
         "ΔNLL: Output degradation (input_nll shift from baseline) at best coefficient",
         "p-value: t-test of target transfer effect vs baseline",
     ]
-    return "\n".join(header_lines)
+    return "\n".join(header_lines), table_md

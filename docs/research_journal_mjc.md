@@ -1423,3 +1423,36 @@ Transfer (Target): Δ in Truthfulness at best coefficient vs baseline (coeff=0)
 Transfer (Others): Mean |Δ| across 29 non-target moral values (precision measure)
 ΔNLL: Output degradation (input_nll shift from baseline) at best coefficient
 p-value: t-test of target transfer effect vs baseline
+
+['nbs/train.py', '--no-ipissa-rotate-v']
+04:12:27 | INFO     | 
+## Unsupervised Transfer Evaluation: Honesty Pairs -> DailyDilemmas Truthfulness
+Training: 1000 contrastive honesty pairs | Eval: 907 moral dilemmas (Virtue/Truthfulness + 29 other values)
+
+| Method            | Coeff   |   Transfer (Target) ↑ | p-value   |   ΔNLL ↓ |   Transfer (Others) ↓ |
+|:------------------|:--------|----------------------:|:----------|---------:|----------------------:|
+| InnerPiSSA (ours) | ±1.0    |                 0.041 | p=0.16    |    0.441 |                 0.026 |
+| InnerPiSSA (ours) | ±0.5    |                 0.029 | p=0.35    |    0.177 |                 0.026 |
+| random            | ±100.0  |                 0.006 | p=0.83    |    0.059 |                 0.009 |
+| PCA (baseline)    | ±100.0  |                 0.004 | p=0.89    |    0.021 |                 0.003 |
+| PCA (baseline)    | ±1.0    |                 0     | p=0.99    |    0.001 |                 0.001 |
+| random            | ±1.0    |                 0     | p=0.99    |    0     |                 0.001 |
+
+'['\''nbs/train.py'\'',' ''\''--model_name=Qwen/Qwen3-0.6B'\'',' ''\''--eval_max_n_dilemmas=64'\'',' ''\''--target-modules=.*\\.(7|10|13|15|17|20|23|25)\\..*(gate_proj|down_proj)'\'',' ''\''--rank=256'\'',' ''\''--batch-size=32'\'',' ''\''--lr=6e-4'\'',' ''\''--weight-decay=0.1'
+'' 
+## Unsupervised Transfer Evaluation: Honesty Pairs '->' DailyDilemmas Truthfulness Training: 1000 contrastive honesty pairs '|' Eval: 64 moral dilemmas '(Virtue/Truthfulness' + 29 other 'values)'
+
+ Virtue/Truthfulness 0.5464 0.9978 0.8036 0.7888 0.7261 0.7040 0.4758
+ Virtue/Ambition 0.2781 NaN 0.3307 0.3307 0.3288 0.3272 '0.1771'
+
+|' Method '|' Coeff '|' Transfer '(Target)' ↑ '|' p-value '|' ΔNLL ↓ '|' Transfer '(Others)' ↓ '|
+|:------------------|:--------|----------------------:|:----------|---------:|----------------------:|'
+|' InnerPiSSA '(ours)' '|' ±5.0 '|' -0.313 '|' p=0.01 '|' 2.502 '|' 0.163 '|
+|' PCA '(baseline)' '|' ±100.0 '|' -0.106 '|' p=0.43 '|' 0.199 '|' 0.07 '|
+|' InnerPiSSA '(ours)' '|' ±0.5 '|' -0.063 '|' p=0.65 '|' 0.015 '|' 0.047 '|
+|' random '|' ±100.0 '|' -0.04 '|' p=0.76 '|' 0.186 '|' 0.022 '|
+|' PCA '(baseline)' '|' ±1.0 '|' -0.002 '|' p=0.99 '|' 0 '|' 0.002 '|
+|' random '|' ±1.0 '|' -0.001 '|' p=0.99 '|' 0.001 '|' 0.002 '|
+|' InnerPiSSA '(ours)' '|' ±1.0 '|' 0.209 '|' p=1.00 '|' 0.526 '|' 0.721 '|'
+
+## Unsupervi
