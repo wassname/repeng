@@ -833,6 +833,47 @@ def log_example_outputs(model, tokenizer, choice_ids, coeffs, title):
     logger.info("=" * 90 + "\n")
 
 
+def auto_flip_adapter_sign(model, tokenizer, choice_ids, adapter_name, threshold=0.0):
+    """Automatically flip adapter sign if coeff=+1 decreases truthfulness.
+
+    Runs generate_example_outputs with coeffs=[-1, 0, 1]. If score(+1) < score(-1),
+    negates all learnable adapter parameters to reverse the direction.
+    """
+    logger.info("Checking adapter sign direction...")
+    examples = generate_example_outputs(model, tokenizer, choice_ids, coeffs=[-1, 0, 1])
+    
+    # Extract scores: index 0: -1, 1: 0, 2: +1
+    score_neg, score_zero, score_pos = [ex[2] for ex in examples]
+    
+    logger.info(f"Scores: coeff=-1: {score_neg:.3f}, coeff=0: {score_zero:.3f}, coeff=+1: {score_pos:.3f}")
+    
+    if score_pos > score_neg + threshold:
+        logger.info("Adapter direction correct: +1 increases truthfulness.")
+        flipped = False
+    else:
+        logger.info("Flipping adapter sign: +1 was decreasing truthfulness.")
+        # Flip all learnable adapter parameters
+        flipped_params = 0
+        for name, param in model.named_parameters():
+            if (adapter_name in name and 
+                "ipissa_" in name and 
+                param.requires_grad):
+                param.data *= -1
+                flipped_params += 1
+        logger.info(f"Flipped {flipped_params} learnable parameters.")
+        flipped = True
+    
+    # Verify flip
+    if flipped:
+        logger.info("Verifying flip...")
+        new_examples = generate_example_outputs(model, tokenizer, choice_ids, coeffs=[-1, 0, 1])
+        new_score_neg, new_score_zero, new_score_pos = [ex[2] for ex in new_examples]
+        logger.info(f"After flip: coeff=-1: {new_score_neg:.3f}, coeff=0: {new_score_zero:.3f}, coeff=+1: {new_score_pos:.3f}")
+        assert new_score_pos > new_score_neg + threshold, "Flip failed to correct direction!"
+    
+    return flipped
+
+
 def main(config: TrainingConfig):
     """Main training pipeline."""
     setup_logging(config.verbose)
@@ -952,6 +993,19 @@ def main(config: TrainingConfig):
         [-1, 0, 1],
         "AFTER TRAINING - Example outputs at different steering coefficients:",
     )
+
+    # Auto-flip adapter sign if needed
+    flipped = auto_flip_adapter_sign(model, tokenizer, choice_ids, config.dataset_name)
+    if flipped:
+        logger.info("Adapter sign flipped successfully.")
+        # Re-log examples after flip
+        log_example_outputs(
+            model,
+            tokenizer,
+            choice_ids,
+            [-1, 0, 1],
+            "AFTER AUTO-FLIP - Example outputs at different steering coefficients:",
+        )
 
     # Evaluation
     df_res_wlabels, df_res_pv = evaluate_model(model, tokenizer, config, dirs_pca)
