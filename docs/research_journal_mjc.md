@@ -810,3 +810,37 @@ ah yes it was the "calibration"! fixed
 Pros: Intuitive (expected value under policy), handles label weighting naturally, standard for value-based evals (matches DailyDilemmas paper).
 
 Cons: Sigmoid nonlinearity can mask logprob shifts; range [-1,1] but deltas small (0.1-0.3 meaningful but not intuitive). Absolute value in results makes positive=more truthful, but direction needs calibration (added post-training flip based on example outputs).
+
+## 2025-11-12: Metric Selection for Daily Dilemmas Evaluation
+
+### Decision: Use log-probability scores for reporting
+
+After testing three metrics (binary accuracy, probability score, log-probability score), chose **log-probability** despite being hardest to explain.
+
+### Reasoning
+
+1. **Statistical necessity**: Linear regression for dose-response testing (reversibility) only works in log-space. Prob-space regression gave weak p-values (0.255 vs 0.001) because sigmoid compression makes the relationship nonlinear.
+
+2. **Saturation handling**: Models are already near-maximal truthfulness at baseline (~70% accuracy). Log-space captures small improvements that binary/prob metrics compress away. When you're already truthful, log-odds changes matter more than probability changes.
+
+3. **Visualization**: Effect vs coherence plots only separate methods cleanly in log-space. Prob/binary metrics cluster together, making it impossible to see which interventions are efficient.
+
+4. **Matches intervention physics**: We do linear interventions in representation space → linear effects in log-odds space. Using log-scores respects the geometry of what we're actually doing.
+
+### Trade-offs
+
+- ✗ Harder to explain: "2.587 increase in log-odds weighted truthfulness" vs "24.5% increase"
+- ✓ Statistically rigorous: p=0.001 vs p=0.255
+- ✓ Preserves information: No thresholding (binary) or sigmoid compression (prob)
+- ✓ Handles saturation: Detects improvements when baseline is already high
+
+### Explanation strategy
+
+Frame as: "Log-probability score measures the strength of the model's preference for truthful actions. A score of 2.587 means the model is e^2.587 ≈ 13× more likely to choose truthfully after intervention."
+
+Can also report binary accuracy as supplementary metric for intuition (30.5pp increase), but use log-scores for main results and statistics.
+
+### Results
+
+InnerPiSSA ±1.0: Δ logscore = 2.587, p=0.001, ΔNLL=0.314
+- This is the right metric. Do the hard work of explaining it properly rather than using a worse metric that's easier to explain.

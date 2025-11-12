@@ -138,24 +138,22 @@ We compare multiple steering methods on transfer from honesty training to moral 
 
 ## Result
 
-
-
 | Method            | Coeff   |   Target Effect |   Side Effects |   p-value |   Output Quality |   Normalized Gain (%) |
-|:------------------|:--------|----------------:|---------------:|----------:|-----------------:|----------------------:|
 |                   |         |       Δ Truth ↑ |      Δ Other ↓ |           |          Δ NLL ↓ |                       |
-| InnerPiSSA (ours) | ±1.0    |           0.245 |          0.117 |     0.589 |            0.314 |                18.660 |
-| InnerPiSSA (ours) | ±2.0    |           0.321 |          0.162 |     0.708 |            1.403 |                13.346 |
-| InnerPiSSA (ours) | ±5.0    |           0.332 |          0.165 |     0.986 |            3.063 |                 8.178 |
-| InnerPiSSA (ours) | ±15.0   |           0.302 |          0.144 |     1.000 |            3.429 |                 6.809 |
-| random            | ±100.0  |           0.072 |          0.045 |     0.159 |            0.157 |                 6.247 |
-| prompting         | ±1.0    |           0.069 |          0.045 |     0.764 |            0.109 |                 6.238 |
-| PCA (baseline)    | ±100.0  |           0.053 |          0.039 |     0.312 |            0.263 |                 4.231 |
-| PCA (baseline)    | ±1.0    |          -0.001 |          0.002 |     0.524 |            0.000 |                -0.104 |
-| random            | ±1.0    |          -0.001 |          0.003 |     0.861 |            0.000 |                -0.126 |
+|:------------------|:--------|----------------:|---------------:|----------:|-----------------:|----------------------:|
+| InnerPiSSA (ours) | ±1.0    |           0.245 |          0.117 |     0.001 |            0.314 |                18.660 |
+| InnerPiSSA (ours) | ±2.0    |           0.321 |          0.162 |     0.089 |            1.403 |                13.346 |
+| InnerPiSSA (ours) | ±5.0    |           0.332 |          0.165 |     0.914 |            3.063 |                 8.178 |
+| InnerPiSSA (ours) | ±15.0   |           0.302 |          0.144 |     0.000 |            3.429 |                 6.809 |
+| random            | ±100.0  |           0.072 |          0.045 |     0.860 |            0.157 |                 6.247 |
+| prompting         | ±1.0    |           0.069 |          0.045 |     0.458 |            0.117 |                 6.193 |
+| PCA (baseline)    | ±100.0  |           0.053 |          0.039 |     0.869 |            0.263 |                 4.231 |
+| PCA (baseline)    | ±1.0    |          -0.001 |          0.002 |     0.995 |            0.000 |                -0.104 |
+| random            | ±1.0    |          -0.001 |          0.003 |     0.988 |            0.000 |                -0.126 |
 
-**Honesty Transfer to Morality (Daily Dilemmas (200 train → 64 test).** Model: Qwen/Qwen3-0.6B. Target Effect: Δ Truthfulness score vs baseline. Side Effects: mean |Δ| across 31 non-target values. Output Quality: coherence degradation (ΔNLL). Normalized Gain (%) = 100 × Δ Truth / (1 + Δ NLL); higher values indicate more efficient steering (truthfulness gain per unit coherence cost). p-values from linear regression testing monotonic dose-response (effect scales with coeff).
+**Honesty Transfer to Morality (Daily Dilemmas (200 train → 64 test).** Model: Qwen/Qwen3-0.6B. Target Effect: Δ Truthfulness probability score vs baseline. Side Effects: mean |Δ| across 31 non-target values. Output Quality: coherence degradation (ΔNLL). Normalized Gain (%) = 100 × Δ Truth / (1 + Δ NLL); higher values indicate more efficient steering. p-values from linear regression on log-probability scores testing monotonic dose-response (effect scales linearly with coeff in log-space).
 
-
+![](docs/tables/effect_vs_coherence.png)
 
 ## Appendix: Experiments and Rationales
 

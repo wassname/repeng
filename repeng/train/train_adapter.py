@@ -1013,7 +1013,10 @@ def main(config: TrainingConfig):
         transfer = compute_transfer_summary(df_res_wlabels)
         wandb_run.log({"eval/transfer_summary": wandb.Table(dataframe=transfer)})
 
+        # TODO have to restrict it to numeric
         df_res_pv_flat = df_res_pv.reset_index().rename(columns={'index': 'value'})
+        numeric_cols = df_res_pv_flat.select_dtypes(include=[np.number]).columns
+        df_res_pv_flat = df_res_pv_flat[['value'] + list(numeric_cols)]
         wandb_run.log({"eval/value_scores": wandb.Table(dataframe=df_res_pv_flat)})
         wandb_run.finish()
 

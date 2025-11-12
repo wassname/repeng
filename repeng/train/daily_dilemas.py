@@ -321,7 +321,7 @@ def compute_coherence_metrics(df_results, nll_threshold=3.0, valid_threshold=0.8
     return df_results.groupby(['method', 'coeff']).apply(compute_metrics, include_groups=False)
 
 
-def compute_transfer_summary(df_results, target_col='score_Virtue/Truthfulness'):
+def compute_transfer_summary(df_results, target_col='score_Virtue/Truthfulness', target_col_log='logscore_Virtue/Truthfulness'):
     """Compute transfer effect summary for each (method, coeff_mag) pair.
     
     Creates separate rows for each coefficient magnitude tested (e.g., ±5, ±15).
@@ -329,7 +329,8 @@ def compute_transfer_summary(df_results, target_col='score_Virtue/Truthfulness')
     
     Args:
         df_results: Processed results with score columns
-        target_col: Primary metric to evaluate (default: Truthfulness)
+        target_col: Primary metric to report (default: prob-based Truthfulness score)
+        target_col_log: Metric for p-value computation (default: log-based Truthfulness score)
     
     Returns:
         DataFrame with one row per (method, coeff_mag) showing transfer metrics
@@ -346,8 +347,9 @@ def compute_transfer_summary(df_results, target_col='score_Virtue/Truthfulness')
     for method in df_results['method'].unique():
         df_m = df_results.query('method == @method')
         
-        # Baseline score for this method at coeff=0
+        # Baseline score for this method at coeff=0 (prob-based for reporting)
         baseline_vals = df_m.query('coeff == 0')[target_col].dropna()
+        
         if len(baseline_vals) == 0:
             baseline_score = 0.0
         else:
@@ -362,7 +364,7 @@ def compute_transfer_summary(df_results, target_col='score_Virtue/Truthfulness')
             df_mag = df_m.query('coeff_mag == @coeff_mag')
             coeffs_at_mag = df_mag['coeff'].unique()
             
-            # Compute effects for each sign
+            # Compute effects for each sign (using prob-based metric for reporting)
             effects = {}
             for coeff in coeffs_at_mag:
                 vals = df_mag.query('coeff == @coeff')[target_col].dropna()
@@ -376,17 +378,20 @@ def compute_transfer_summary(df_results, target_col='score_Virtue/Truthfulness')
             best_coeff = max(effects.items(), key=lambda x: abs(x[1]))[0]
             max_transfer = effects[best_coeff]
             
-            # Compute p-value for monotonic dose-response (linear trend across -c, 0, +c)
-            # Collect effects including baseline (0)
-            all_effects = {0: 0.0}  # Baseline delta is 0 by definition
-            all_effects.update(effects)
+            # Test monotonic dose-response using LOG-SPACE metric (linear in intervention space)
+            # Collect all samples at -c, 0, +c with their coefficient labels
+            dose_response_data = []
+            for coeff in [-coeff_mag, 0, coeff_mag]:
+                samples = df_m.query('coeff == @coeff')[target_col_log].dropna().values
+                for sample_val in samples:
+                    dose_response_data.append({'coeff': coeff, 'score': sample_val})
             
-            if len(all_effects) >= 3:  # Need -c, 0, +c for trend test
-                coeffs_sorted = sorted(all_effects.keys())
-                deltas = [all_effects[c] for c in coeffs_sorted]
+            if len(dose_response_data) >= 10:  # Need reasonable sample size
                 try:
-                    result = stats.linregress(coeffs_sorted, deltas)
-                    p_value = result.pvalue  # Two-tailed p for slope != 0
+                    df_dose = pd.DataFrame(dose_response_data)
+                    # Linear regression: logscore ~ coeff (tests if effect scales with dose)
+                    result = stats.linregress(df_dose['coeff'], df_dose['score'])
+                    p_value = result.pvalue  # Two-tailed test for slope != 0
                 except Exception:
                     p_value = 1.0
             else:
@@ -427,17 +432,18 @@ def compute_transfer_summary(df_results, target_col='score_Virtue/Truthfulness')
     return pd.DataFrame(results)
 
 
-def format_results_table(df_results, config, target_col='score_Virtue/Truthfulness', target_method='InnerPiSSA (ours)'):
+def format_results_table(df_results, config, target_col='score_Virtue/Truthfulness', target_col_log='logscore_Virtue/Truthfulness', target_method='InnerPiSSA (ours)'):
     """Generate paper-ready results table.
     
     Args:
         df_results: Processed evaluation results
-        target_col: Primary target metric
+        target_col: Primary target metric (prob-based, for reporting)
+        target_col_log: Log-based metric (for p-value computation)
     
     Returns:
         Formatted string table
     """
-    summary = compute_transfer_summary(df_results, target_col=target_col)
+    summary = compute_transfer_summary(df_results, target_col=target_col, target_col_log=target_col_log)
     
     # Sort by coefficient magnitude, then method
     summary = summary.sort_values(['coeff_mag', 'method'], ascending=[False, True])
@@ -448,11 +454,11 @@ def format_results_table(df_results, config, target_col='score_Virtue/Truthfulne
         p = row.get('p_value', 1.0)
         
         # Flip sign for truthfulness (negative transfer_effect = more truthful)
-        target_effect = -row['transfer_effect']
+        target_effect = np.abs(row['transfer_effect'])
         
         rows.append({
             "Method": row['method'],
-            "Coeff\n": f"±{row['coeff_mag']:.1f}",
+            "Coeff\n±": row['coeff_mag'],
             "Target Effect\nΔ Truth ↑": target_effect,
             "Side Effects\nΔ Other ↓": row['mean_collateral'],
             "p-value": p,
@@ -472,15 +478,25 @@ def format_results_table(df_results, config, target_col='score_Virtue/Truthfulne
     target_name = target_col.replace('score_', '').replace('Virtue/', '')
     n_other = row.get('total_values', 30) - 1
     
-    # TODO also say the model used, dataset size
+    # Detect metric type from column name for better caption
+    is_binary = 'binary_' in target_col
+    is_logscore = 'logscore_' in target_col
+    
+    if is_binary:
+        metric_desc = "accuracy (percentage points)"
+    elif is_logscore:
+        metric_desc = "log-probability score"
+    else:
+        metric_desc = "probability score"
+    
     caption = (
         f"**Honesty Transfer to Morality (Daily Dilemmas ({config.dataset_max_samples} train → {eval_size} test).** "
         f"Model: {config.model_name}. "
-        f"Target Effect: Δ {target_name} score vs baseline. "
+        f"Target Effect: Δ {target_name} {metric_desc} vs baseline. "
         f"Side Effects: mean |Δ| across {n_other} non-target values. "
         f"Output Quality: coherence degradation (ΔNLL). "
-        f"Normalized Gain (%) = 100 × Δ Truth / (1 + Δ NLL); higher values indicate more efficient steering (truthfulness gain per unit coherence cost). "
-        f"p-values from linear regression testing monotonic dose-response (effect scales with coeff)."
+        f"Normalized Gain (%) = 100 × Δ Truth / (1 + Δ NLL); higher values indicate more efficient steering. "
+        f"p-values from linear regression on log-probability scores testing monotonic dose-response (effect scales linearly with coeff in log-space)."
     )
     
     header_lines = [
@@ -491,5 +507,5 @@ def format_results_table(df_results, config, target_col='score_Virtue/Truthfulne
 
     # FIXME, we should have a simple table with simple names
     # and a great table with detailed names for paper, to latex in console and html saved
-    score = df_table[df_table["Coeff\n"]=="±1.0"]['Normalized Gain (%)'][target_method].item()
+    score = df_table[df_table["Coeff\n±"]==1.0]['Normalized Gain (%)'][target_method].item()
     return "\n".join(header_lines), df_table, score

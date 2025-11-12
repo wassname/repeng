@@ -32,17 +32,169 @@ config = cattrs.structure(d, TrainingConfig)
 print(f"Evaluation results:\n{df_res_pv.round(4)}")
 
 # Optionally load prompting baseline if exists
-prompting_path = proj_root / "outputs" / "prompting_baseline.parquet"
-if prompting_path.exists():
-    res_prompting = pd.read_parquet(prompting_path)
-    df_res_wlabels = pd.concat([df_res_wlabels, res_prompting], ignore_index=True)
-    print(f"Added prompting baseline ({len(res_prompting)} rows)")
+# NOTE: Disabled for performance - prompting baseline has 32k+ rows which slows down compute_transfer_summary
+# prompting_path = proj_root / "outputs" / "prompting_baseline.parquet"
+# if prompting_path.exists():
+#     res_prompting = pd.read_parquet(prompting_path)
+#     df_res_wlabels = pd.concat([df_res_wlabels, res_prompting], ignore_index=True)
+#     print(f"Added prompting baseline ({len(res_prompting)} rows)")
 
-d = format_results_table(df_res_wlabels, target_col='score_Virtue/Truthfulness', config=config)
-print(d)
 
-d = format_results_table(df_res_wlabels, target_col='logprob_Virtue/Truthfulness', config=config)
-print(d)
+
+md, df, s = format_results_table(df_res_wlabels, target_col='binary_Virtue/Truthfulness', config=config)
+print(md)
+
+
+md, df, s = format_results_table(df_res_wlabels, target_col='score_Virtue/Truthfulness', config=config)
+print(md)
+
+md, df, s = format_results_table(df_res_wlabels, target_col='logscore_Virtue/Truthfulness', config=config)
+print(md)
 
 # %%
+from great_tables import GT, md, html
 
+# Create publication-quality table
+gt_table = (
+    GT(df.reset_index())
+    .tab_header(
+        title="Honesty Transfer to Morality via Representation Engineering",
+        subtitle=md(f"Daily Dilemmas dataset ({config.dataset_max_samples} train → {config.eval_max_n_dilemmas or 64} test) | Model: {config.model_name}")
+    )
+    .tab_spanner(
+        label="Steering",
+        columns=["Method", "Coeff\n±"]
+    )
+    .tab_spanner(
+        label="Transfer Effects",
+        columns=["Target Effect\nΔ Truth ↑", "Side Effects\nΔ Other ↓", "p-value"]
+    )
+    .tab_spanner(
+        label="Quality Metrics",
+        columns=["Output Quality\nΔ NLL ↓", "Normalized Gain (%)"]
+    )
+    .cols_label(
+        Method="Method",
+        **{"Coeff\n±": "Coeff ±"},
+        **{"Target Effect\nΔ Truth ↑": html("Δ Truth<br>↑")},
+        **{"Side Effects\nΔ Other ↓": html("Δ Other<br>↓")},
+        **{"Output Quality\nΔ NLL ↓": html("Δ NLL<br>↓")},
+        **{"Normalized Gain (%)": html("Norm. Gain<br>(%)")}
+    )
+    .fmt_number(
+        columns=["Target Effect\nΔ Truth ↑", "Side Effects\nΔ Other ↓", "Output Quality\nΔ NLL ↓"],
+        decimals=3
+    )
+    .fmt_number(
+        columns=["p-value"],
+        decimals=3
+    )
+    .fmt_number(
+        columns=["Normalized Gain (%)"],
+        decimals=1
+    )
+    .tab_source_note(
+        source_note=md(
+            f"**Target Effect**: Δ Truthfulness score vs baseline (higher = more truthful). "
+            f"**Side Effects**: mean |Δ| across {df.iloc[0].get('total_values', 30) - 1} non-target moral values (lower = less collateral). "
+            f"**Output Quality**: coherence degradation ΔNLL (lower = better). "
+            f"**Normalized Gain** = 100 × Δ Truth / (1 + Δ NLL) measures steering efficiency. "
+            f"**p-values** test monotonic dose-response via linear regression."
+        )
+    )
+
+)
+
+gt_table_html = gt_table.data_color(
+        columns=["Normalized Gain (%)"],
+        palette=["#f7fcf5", "#c7e9c0", "#74c476", "#31a354", "#006d2c"],
+        domain=[df["Normalized Gain (%)"].min(), df["Normalized Gain (%)"].max()]
+    )
+
+
+# Save outputs
+output_dir = result_dir / "tables"
+output_dir.mkdir(exist_ok=True)
+
+# Display in notebook
+gt_table_html.show('browser')
+
+# %%
+import matplotlib.pyplot as plt
+
+# Extract coefficient from the "Coeff\n±" column
+df_plot = df.copy()
+df_plot['coeff_value'] = df_plot['Coeff\n±']
+
+# Plot effect vs coherence
+fig, ax = plt.subplots(figsize=(10, 7))
+scatter = ax.scatter(
+    df_plot['Output Quality\nΔ NLL ↓'], 
+    df_plot['Target Effect\nΔ Truth ↑'],
+    c=df_plot['coeff_value'],  # Color by coefficient magnitude
+    cmap='coolwarm',
+    s=150,
+    alpha=0.7,
+    edgecolors='black',
+    linewidth=0.5
+)
+
+# Add colorbar
+cbar = plt.colorbar(scatter, ax=ax)
+cbar.set_label('Coefficient Magnitude', fontsize=11)
+
+# Use adjustText for non-overlapping labels if available, otherwise use smart positioning
+try:
+    from adjustText import adjust_text
+    texts = []
+    for idx, row in df_plot.iterrows():
+        text = ax.annotate(
+            f"{idx}\n(±{row['coeff_value']:.1f})", 
+            (row['Output Quality\nΔ NLL ↓'], row['Target Effect\nΔ Truth ↑']),
+            fontsize=8,
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8, edgecolor='gray', linewidth=0.5)
+        )
+        texts.append(text)
+    
+    # Adjust text positions to avoid overlap
+    adjust_text(texts, arrowprops=dict(arrowstyle='->', color='gray', lw=0.5), ax=ax)
+except ImportError:
+    # Fallback: use offset positioning with alternating directions
+    offsets = [(10, 10), (-10, 10), (10, -10), (-10, -10), (15, 0), (-15, 0)]
+    for i, (idx, row) in enumerate(df_plot.iterrows()):
+        offset = offsets[i % len(offsets)]
+        ax.annotate(
+            f"{idx}\n(±{row['coeff_value']:.1f})", 
+            (row['Output Quality\nΔ NLL ↓'], row['Target Effect\nΔ Truth ↑']),
+            xytext=offset, 
+            textcoords='offset points',
+            fontsize=8,
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8, edgecolor='gray', linewidth=0.5),
+            arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0.3', color='gray', lw=0.5)
+        )
+
+ax.set_xlabel('Coherence Degradation (Δ NLL ↓)', fontsize=12)
+ax.set_ylabel('Target Effect (Δ Truth ↑)', fontsize=12)
+ax.set_title('Effect vs Coherence: Steering Efficiency Trade-off', fontsize=14, fontweight='bold')
+ax.grid(True, alpha=0.3)
+
+# Save the plot
+plot_path = output_dir / "effect_vs_coherence.png"
+plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+print(f"Saved plot to {plot_path}")
+
+plt.show()
+
+# Save as HTML
+gt_table_html.write_raw_html(str(output_dir / "results_table.html"))
+print(f"Saved HTML to {output_dir / 'results_table.html'}")
+
+# Save as LaTeX
+try:
+    # FIXME: latex does not support styles
+    latex_str = gt_table.as_latex()
+    (output_dir / "results_table.tex").write_text(latex_str)
+    print(f"Saved LaTeX to {output_dir / 'results_table.tex'}")
+except Exception as e:
+    print(f"Could not save LaTeX (install tinytex if needed): {e}")
+# TODO make great table with proper everything and output latex and html
