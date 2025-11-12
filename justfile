@@ -1,61 +1,115 @@
 
 
-run:
-    #!/bin/bash -x
-    . .venv/bin/activate
-    CMD=`uv run python nbs/train.py  --model_name=Qwen/Qwen3-0.6B --eval_max_n_dilemmas=64 --target-modules=".*\.(7|10|13|15|17|20|23|25)\..*(gate_proj|down_proj)" --rank=256 --batch-size=32 --lr=6e-4 --weight-decay=0.1`
+# Quick test run
+quick:
+    uv run python nbs/train.py --quick --model-name=Qwen/Qwen3-0.6B --batch-size=64
 
-    # one full run
-    $CMD --scale-s=add2
-    $CMD --scale-s=add
-    $CMD --loss-type=softplus_only
-    $CMD --loss-type=softplus
-    $CMD --loss-type=tanh2v1
-    
-
-    uv run python nbs/train.py --model_name="Qwen/Qwen3-0.6B" --rank=256 --target-modules=".*\.(7|10|13|15|17|20|23|25)\..*(o_proj|up_proj)" --batch-size=32
-
+# Default full run
+default:
     uv run python nbs/train.py
 
-    # TODO ablate
-    $CMD --loss-type=softplus_only
-    $CMD --no-ipissa-rotate-v
-    $CMD --no-ipissa-rotate-u
-    $CMD --scale-s=none
-    $CMD --scale-s=add
-    $CMD --no-ipissa-rotate-u --no-ipissa-rotate-v
-    $CMD --scale-s=none
-    $CMD --weight-decay=0
-    $CMD --no-ipissa-rotate-u --no-ipissa-rotate-v  --scale-s=none
+# Full ablation suite
+run:
+    #!/bin/bash -ex
+    
+    # Base config for small model ablations
+    BASE="uv run python nbs/train.py --model-name=Qwen/Qwen3-0.6B --eval-max-n-dilemmas=64 --batch-size=32 --n-epochs=100"
+    
+    # Helper to run with base + extra args
+    run_exp() {
+        echo "=== Running: $@ ==="
+        $BASE "$@"
+    }
+    
+    # === Loss type ablations ===
+    echo "### Loss type ablations ###"
+    run_exp --loss-type=logsigmoid  # default
+    run_exp --loss-type=softplus
+    run_exp --loss-type=softplus_only
+    run_exp --loss-type=tanh2v1
+    
+    # === Scale mechanism ablations ===
+    echo "### Scale mechanism ablations ###"
+    run_exp --scale-s=mult  # default
+    run_exp --scale-s=add
+    run_exp --scale-s=add2
+    run_exp --scale-s=none
+    
+    # === Rotation ablations ===
+    echo "### Rotation ablations ###"
+    run_exp --no-ipissa-rotate-u
+    run_exp --no-ipissa-rotate-v
+    run_exp --no-ipissa-rotate-u --no-ipissa-rotate-v
+    run_exp --no-ipissa-rotate-u --no-ipissa-rotate-v --scale-s=none  # minimal adapter
+    
+    # === Learning rate ablations ===
+    echo "### Learning rate ablations ###"
+    run_exp --lr=1e-2
+    run_exp --lr=6e-4
+    run_exp --lr=1e-4
+    
+    # === Weight decay ablations ===
+    echo "### Weight decay ablations ###"
+    run_exp --weight-decay=0.0
+    run_exp --weight-decay=0.1  # default
+    run_exp --weight-decay=1.0
+    
+    # === Rank ablations ===
+    echo "### Rank ablations ###"
+    run_exp --rank=8
+    run_exp --rank=24  # default
+    run_exp --rank=64
+    run_exp --rank=256
+    run_exp --rank=512
+    
+    # === Layer selection ablations ===
+    echo "### Layer selection ablations ###"
+    run_exp --layers gate_proj up_proj  # default
+    run_exp --layers gate_proj down_proj
+    run_exp --layers o_proj up_proj
+    run_exp --layers gate_proj up_proj down_proj o_proj --rank=16
+    run_exp --layers k_proj q_proj v_proj --rank=16
+    
+    # === Number of layers ablations ===
+    echo "### Number of layers ablations ###"
+    run_exp --num-layers=3
+    run_exp --num-layers=5  # default
+    run_exp --num-layers=8
+    run_exp --num-layers=12 --perc-start=0.15
+    
+    # === Layer range ablations ===
+    echo "### Layer range ablations ###"
+    run_exp --perc-start=0.1
+    run_exp --perc-start=0.3  # default
+    run_exp --perc-start=0.5
+    run_exp --end-layers=-1
+    run_exp --end-layers=-5
 
-    $CMD --lr=1e-2
-    $CMD --lr=1e-4 --weight-decay=0.1
-    $CMD --rank=8
-    $CMD --rank=512
-    $CMD --target-modules=".*\.(5|7|10|13|15|20|25|30|33)\..*(gate_proj|down_proj)"
-    $CMD --target-modules=".*\.(7|13|20|30|33)\..*(o_proj|up_proj)"
-    $CMD --target-modules="all-linear" --rank=4
+# Focused ablations for paper
+ablate-core:
+    #!/bin/bash -ex
+    BASE="uv run python nbs/train.py --model-name=Qwen/Qwen3-0.6B --eval-max-n-dilemmas=128 --batch-size=32"
+    
+    # Core comparisons
+    echo "=== Baseline (full method) ==="
+    $BASE
+    
+    echo "=== No rotation ==="
+    $BASE --no-ipissa-rotate-u --no-ipissa-rotate-v
+    
+    echo "=== No scaling ==="
+    $BASE --scale-s=none
+    
+    echo "=== Minimal (no rotation, no scaling) ==="
+    $BASE --no-ipissa-rotate-u --no-ipissa-rotate-v --scale-s=none
+    
+    echo "=== Different loss ==="
+    $BASE --loss-type=softplus_only
 
-    # also ablate svd, just use lora
-
-    CMD="uv run python nbs/train.py"
-
-    # TODO ablate
-    $CMD --loss-type=softplus_only
-    $CMD --no-ipissa-rotate-v
-    $CMD --no-ipissa-rotate-u
-    $CMD --scale-s=none
-    $CMD --scale-s=add
-    $CMD --no-ipissa-rotate-u --no-ipissa-rotate-v
-    $CMD --scale-s=none
-    $CMD --weight-decay=0
-    $CMD --no-ipissa-rotate-u --no-ipissa-rotate-v  --scale-s=none
-
-    $CMD --lr=1e-2
-    $CMD --lr=1e-4 --weight-decay=0.1
-    $CMD --lr=1e-4 --weight-decay=1.0
-    $CMD --rank=8
-    $CMD --rank=512
-    $CMD --target-modules=".*\.(5|7|10|13|15|20|25|30|33)\..*(gate_proj|down_proj)"
-    $CMD --target-modules=".*\.(7|13|20|30|33)\..*(o_proj|up_proj)"
-    $CMD --target-modules=".*\.(5|15|25|33)\..*"  --rank=16
+# Large model run
+run-large:
+    uv run python nbs/train.py \
+        --model-name=Qwen/Qwen3-4B-Instruct-2507 \
+        --batch-size=6 \
+        --rank=24 \
+        --n-epochs=100

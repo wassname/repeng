@@ -1,7 +1,8 @@
 from loguru import logger
 import torch
 from typing import List
-
+import torch.nn.functional as F
+from einops import rearrange
 
 def is_choice(choice: str, match: str) -> bool:
     # Many tokenizers don't just use Yes, but \nYes, " Yes" "ĠYes" "###Yes" and so on. We need to catch all variants. This will also catch eyes, but it's a minor problem, it's unlikely to be a likely token.
@@ -18,20 +19,31 @@ def get_choice_ids(tokenizer, positive_word="yes", negative_word="no") -> List[L
 
 
 def calc_nll(input_ids, logits, attention_mask):
-    """Calculate per-sequence NLL from input_ids and logits."""
-    shift_logits = logits[:, :-1, :].contiguous()
-    shift_labels = input_ids[:, 1:].contiguous()
-    # shift_labels = torch.where(attention_mask[:, 1:] == 1, shift_labels, -100)
+    """Calculate per-sequence NLL from input_ids and logits.
     
-    shift_mask = attention_mask[:, 1:].contiguous()
-
-    loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
-    token_nll = loss_fct(
-        shift_logits.view(-1, shift_logits.size(-1)),
-        shift_labels.view(-1)
-    ).view(shift_labels.size())
-
-    seq_nll = (token_nll * shift_mask).sum(dim=1) / shift_mask.sum(dim=1).clamp(min=1)
+    Uses F.cross_entropy_loss with ignore_index=-100 for efficient masking.
+    PyTorch skips computation for masked tokens internally.
+    """
+    shift_logits = logits[:, :-1, :]  # [b, s-1, vocab]
+    shift_labels = input_ids[:, 1:]  # [b, s-1]
+    shift_mask = attention_mask[:, 1:]  # [b, s-1]
+    
+    # Mask padded tokens with -100 (ignored by loss function)
+    shift_labels = torch.where(shift_mask == 1, shift_labels, -100)
+    
+    b, s = shift_labels.shape
+    
+    # F.cross_entropy_loss with reduction='none' gives per-token loss
+    # ignore_index=-100 means masked tokens are skipped (return 0 loss)
+    token_nll = F.cross_entropy(
+        rearrange(shift_logits, 'b s v -> (b s) v'),
+        rearrange(shift_labels, 'b s -> (b s)'),
+        reduction='none',
+        ignore_index=-100
+    ).view(b, s)
+    
+    # Sum over sequence, divide by number of valid tokens
+    seq_nll = token_nll.sum(dim=1) / shift_mask.sum(dim=1).clamp(min=1)
     return seq_nll
 
 

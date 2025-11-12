@@ -66,15 +66,16 @@ class TrainingConfig:
     model_name: str = "Qwen/Qwen3-4B-Instruct-2507"
     quantization_type: Literal["4bit", "8bit", "none"] = "none"
 
-    """
-    The most stable modules appear to be up and down proj. The attention heads require some experiment. The [CLOVER](https://arxiv.org/abs/2411.17426) paper had some success by merging and using SVD on joint matrix
-    """
-    target_modules: str = ".*\.(10|20|30|33)\..*(gate_proj)"
+    # layers to target
+    layers: List[str] = ["gate_proj", "up_proj"]
+    num_layers: int = 5 # intervene on this many layers, spaced evenly
+    perc_start: float = 0.3 # ignore the first X% of layers
+    end_layers: int = -3 # ignore the last X layers
 
     # Training params
     batch_size: int = 6
-    n_epochs: int = 100
-    lr: float = 6e-4
+    n_epochs: int = 10
+    lr: float = 2e-3
     weight_decay: float = 0.1
     log_n: int = 10 # log this many times per training
     grad_accum_steps: int = 10
@@ -106,7 +107,7 @@ class TrainingConfig:
     # Output
     output_dir: Path = proj_root / "outputs/adapters"
     use_wandb: bool = True
-    wandb_project: str = "repeng-steering"
+    wandb_project: str = "InnerPiSSA"
     save_checkpoints: bool = False
 
 
@@ -243,18 +244,36 @@ def load_model(model_id, quantization_type="none"):
 
 def setup_adapter(base_model, config: TrainingConfig):
     """Setup InnerPiSSA adapter on base model."""
+    total_layers = base_model.config.num_hidden_layers
+    start_layer = int(config.perc_start * total_layers)
+    end_layer = total_layers + config.end_layers
+    layers = np.linspace(start_layer, end_layer, config.num_layers, dtype=int)
+    
+    # Build peft regex: .*\.(layer1|layer2|...)\..*(module1|module2|...)
+    layer_nums = "|".join(str(L) for L in layers)
+    module_names = "|".join(config.layers)
+    target_modules = f".*\\.({layer_nums})\\..*({module_names})"
+    
+    logger.info(f"Target modules regex: {target_modules}")
+    available = {}
+    for name, m in base_model.named_modules():
+        if re.search('\.0\.', name):
+            if isinstance(m, torch.nn.Linear):
+                available[name] = m.weight.shape
+    logger.info(f"Available modules: {available}")
+
     adapter_config = InnerPiSSAConfig(
         r=config.rank,
         scale_s=config.scale_s,
         rotate_u=config.ipissa_rotate_u,
         rotate_v=config.ipissa_rotate_v,
         task_type="CAUSAL_LM",
-        target_modules=config.target_modules,
+        target_modules=target_modules,
     )
 
     model = PeftModel(base_model, adapter_config, adapter_name=config.dataset_name)
     logger.info(
-        f"Adapter configured: rank={config.rank}, target_modules={config.target_modules}"
+        f"Adapter configured: rank={config.rank}, target_modules={target_modules}"
     )
 
     return model
@@ -554,7 +573,7 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca: Optional[
         do_sample=False,
     )
 
-    eval_batch_size = config.eval_batch_size or config.batch_size
+    eval_batch_size = config.eval_batch_size or config.batch_size//2
 
     # Helper function to sweep coefficients with early stopping
     def sweep_coefficients(
@@ -666,6 +685,21 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca: Optional[
                 "random", lambda c: steer(model, dirs_random, coeff=c, retain_grad=False)
             )
         )
+
+    # if we have output_path = Path("../outputs/prompting_baseline.parquet")
+    output_path = proj_root / "outputs/prompting_baseline.parquet"
+    if output_path.exists():
+        logger.info(f"Loading prompting baseline results from {output_path}")
+        df_prompting = pd.read_parquet(output_path)
+        df_prompting = df_prompting[df_prompting['model_id'].isin([config.model_name])]
+        for method, coeff in df_prompting[['method', 'coeff']].unique():
+            d = df_prompting[df_prompting['coeff'] == coeff]
+            d['coeff'] = coeff
+            results.append(d)
+    else:
+        logger.warning(f"Prompting baseline results not found at {output_path}, run nbs/eval_models_with_prompting.ipynb to generate them.")
+
+
 
     df_res2 = pd.concat(results)
     df_res_wlabels = process_daily_dilemma_results(df_res2, dataset_dd, df_labels)[0]
@@ -807,7 +841,7 @@ def main(config: TrainingConfig):
         logger.warning(
             "Running in QUICK mode: small ds, high lr, few epochs, small eval."
         )
-        # config.lr = 5e-3
+        config.lr = 6e-3
         config.n_epochs = 2
         config.grad_accum_steps = 1
         # config.dataset_max_samples = config.batch_size * 8
@@ -923,13 +957,15 @@ def main(config: TrainingConfig):
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     logger.info(f"Config {config}\n")
-    logger.info(f"## Evaluation complete {ts}.\n\n{sys.argv}")
+    logger.info(f"## Evaluation complete {ts}.\n\n{' '.join(sys.argv)}")
 
-    logger.info(f"Evaluation results:\n{df_res_pv['InnerPiSSA (ours)'].head(2).round(4)}")
-    # TODO other methods too as sep tables
+
+    methods = df_res_pv.columns.get_level_values(0).unique()
+    for method in methods:
+        logger.info(f"Results for method: {method}\n{df_res_pv[method].head(2).round(4)}\n")
 
     # Generate comprehensive metrics (both text and markdown)
-    md_table, df_eff_sz = format_results_table(
+    md_table, df_eff_sz, main_score = format_results_table(
             df_res_wlabels, target_col="score_Virtue/Truthfulness", config=config
         )
     logger.info(
@@ -965,17 +1001,10 @@ def main(config: TrainingConfig):
     logger.success(f"All results saved to {save_folder}")
 
     if wandb_run is not None:
-        # LOG 🥇 metric to wandb (effect size at 1 divided by nll inc)
-        effect_size_truth = df_eff_sz.loc[
-            ("InnerPiSSA (ours)", 1.0), "Transfer (Target) ↑"
-        ].item()
-        nll_inc_truth = df_eff_sz.loc[
-            ("InnerPiSSA (ours)", 1.0), "ΔNLL ↓"
-        ].item()
-        main_metric = effect_size_truth / nll_inc_truth
-        wandb_run.summary["eval/main_metric"] = main_metric
+        logger.info(f'🥇{main_score:2.3f}')
+        wandb_run.summary["eval/main_metric"] = main_score
 
-        wandb_run.summary["eval/effect_size_truthfulness"] = effect_size_truth
+        # wandb_run.summary["eval/effect_size_truthfulness"] = effect_size_truth
 
         # Log additional metrics to WandB
         coherence = compute_coherence_metrics(df_res_wlabels)

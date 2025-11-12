@@ -22,6 +22,7 @@ dependencies = [
     "einops>=0.8.1",
     "matplotlib>=3.10.6",
     "simple-parsing>=0.1.7",
+    "great-tables>=0.20.0",
 ]
 
 [dependency-groups]
