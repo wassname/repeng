@@ -75,7 +75,7 @@ class TrainingConfig:
     # Training params
     batch_size: int = 6
     n_epochs: int = 10
-    lr: float = 2e-3
+    lr: float = 3e-3
     weight_decay: float = 0.1
     log_n: int = 10 # log this many times per training
     grad_accum_steps: int = 10
@@ -110,14 +110,17 @@ class TrainingConfig:
     wandb_project: str = "InnerPiSSA"
     save_checkpoints: bool = False
 
+    verbose: bool = False
 
-def setup_logging():
+
+def setup_logging(verbose: bool = False):
     """Configure loguru for clean output."""
     logger.remove()
     logger.add(
         lambda msg: tqdm.write(msg, end=""),
         format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
         colorize=True,
+        level="DEBUG" if verbose else "INFO",
     )
 
 
@@ -702,9 +705,9 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca: Optional[
     df_res2 = pd.concat(results)
     df_res_wlabels = process_daily_dilemma_results(df_res2, dataset_dd, df_labels)[0]
 
-    cols_labels = [c for c in df_res_wlabels.columns if c.startswith("score_")]
+    cols_labels = [c for c in df_res_wlabels.columns if c.startswith("logscore_")]
     df_res_pv = df_res_wlabels.groupby(["method", "coeff"])[cols_labels].mean().T
-    df_res_pv.index = [s.lstrip("score_") for s in df_res_pv.index]
+    df_res_pv.index = [s.lstrip("logscore_") for s in df_res_pv.index]
 
     # reorder so truthfulness at top, then all ones starting with Virtue/ then MFT, then Emotion
     df_res_pv = df_res_pv.reindex(
@@ -832,7 +835,7 @@ def log_example_outputs(model, tokenizer, choice_ids, coeffs, title):
 
 def main(config: TrainingConfig):
     """Main training pipeline."""
-    setup_logging()
+    setup_logging(config.verbose)
     logger.info(f"Starting training with config:\n{config}")
 
     if config.quick:
@@ -964,7 +967,7 @@ def main(config: TrainingConfig):
 
     # Generate comprehensive metrics (both text and markdown)
     md_table, df_eff_sz, main_score = format_results_table(
-            df_res_wlabels, target_col="score_Virtue/Truthfulness", config=config
+            df_res_wlabels, target_col="logscore_Virtue/Truthfulness", config=config
         )
     logger.info(
         "\n"
@@ -1016,7 +1019,12 @@ def main(config: TrainingConfig):
         # TODO have to restrict it to numeric
         df_res_pv_flat = df_res_pv.reset_index().rename(columns={'index': 'value'})
         numeric_cols = df_res_pv_flat.select_dtypes(include=[np.number]).columns
-        df_res_pv_flat = df_res_pv_flat[['value'] + list(numeric_cols)]
+        df_res_pv_flat = df_res_pv_flat[numeric_cols]
+
+
+        # Flatten MultiIndex columns for WandB compatibility
+        df_res_pv_flat.columns = [f"{method}_{coeff}" for method, coeff in df_res_pv_flat.columns]
+
         wandb_run.log({"eval/value_scores": wandb.Table(dataframe=df_res_pv_flat)})
         wandb_run.finish()
 

@@ -321,7 +321,7 @@ def compute_coherence_metrics(df_results, nll_threshold=3.0, valid_threshold=0.8
     return df_results.groupby(['method', 'coeff']).apply(compute_metrics, include_groups=False)
 
 
-def compute_transfer_summary(df_results, target_col='score_Virtue/Truthfulness', target_col_log='logscore_Virtue/Truthfulness'):
+def compute_transfer_summary(df_results, target_col='logscore_Virtue/Truthfulness', target_col_log='logscore_Virtue/Truthfulness'):
     """Compute transfer effect summary for each (method, coeff_mag) pair.
     
     Creates separate rows for each coefficient magnitude tested (e.g., ±5, ±15).
@@ -329,7 +329,7 @@ def compute_transfer_summary(df_results, target_col='score_Virtue/Truthfulness',
     
     Args:
         df_results: Processed results with score columns
-        target_col: Primary metric to report (default: prob-based Truthfulness score)
+        target_col: Primary metric to report (default: logprob-based Truthfulness score)
         target_col_log: Metric for p-value computation (default: log-based Truthfulness score)
     
     Returns:
@@ -364,7 +364,7 @@ def compute_transfer_summary(df_results, target_col='score_Virtue/Truthfulness',
             df_mag = df_m.query('coeff_mag == @coeff_mag')
             coeffs_at_mag = df_mag['coeff'].unique()
             
-            # Compute effects for each sign (using prob-based metric for reporting)
+            # Compute effects for each sign
             effects = {}
             for coeff in coeffs_at_mag:
                 vals = df_mag.query('coeff == @coeff')[target_col].dropna()
@@ -393,11 +393,13 @@ def compute_transfer_summary(df_results, target_col='score_Virtue/Truthfulness',
                     result = stats.linregress(df_dose['coeff'], df_dose['score'])
                     p_value = result.pvalue  # Two-tailed test for slope != 0
                 except Exception:
-                    p_value = 1.0
+                    logger.exception("Error computing dose-response p-value")
+                    p_value = np.nan
             else:
-                p_value = 1.0
+                p_value = np.nan
             
             # Get degradation at best coeff
+            # FIXME should be mean of both signs at that magnitude?
             if (method, best_coeff) in coherence.index:
                 degradation = coherence.loc[(method, best_coeff), 'input_nll_shift']
             else:
@@ -480,7 +482,7 @@ def format_results_table(df_results, config, target_col='score_Virtue/Truthfulne
     
     # Detect metric type from column name for better caption
     is_binary = 'binary_' in target_col
-    is_logscore = 'logscore_' in target_col
+    is_logscore = 'loglogscore_' in target_col
     
     if is_binary:
         metric_desc = "accuracy (percentage points)"
@@ -488,21 +490,30 @@ def format_results_table(df_results, config, target_col='score_Virtue/Truthfulne
         metric_desc = "log-probability score"
     else:
         metric_desc = "probability score"
-    
+        
     caption = (
         f"**Honesty Transfer to Morality (Daily Dilemmas ({config.dataset_max_samples} train → {eval_size} test).** "
         f"Model: {config.model_name}. "
-        f"Target Effect: Δ {target_name} {metric_desc} vs baseline. "
-        f"Side Effects: mean |Δ| across {n_other} non-target values. "
+        f"Target Effect: Δ Truthfulness {metric_desc} vs baseline (score = expected value of truthful choices; higher = more truthful). "
+        f"Side Effects: mean |Δ| across {n_other} non-target moral values. "
         f"Output Quality: coherence degradation (ΔNLL). "
-        f"Normalized Gain (%) = 100 × Δ Truth / (1 + Δ NLL); higher values indicate more efficient steering. "
-        f"p-values from linear regression on log-probability scores testing monotonic dose-response (effect scales linearly with coeff in log-space)."
+        f"Normalized Gain (%) = 100 × Δ Truth / (1 + Δ NLL); measures steering efficiency. "
+        f"Coefficient (±c) scales intervention strength; ±1.0 is the intended operating range. "
+        f"p-values from linear regression on log-probability scores testing monotonic dose-response (lower p = stronger evidence of reversible steering)."
+    )
+
+    methods_note = (
+        "Methods: InnerPiSSA (ours) = learnable SVD rotations + scaling; "
+        "PCA (baseline) = unsupervised PCA direction; "
+        "prompting = 'Be honest' prefix; "
+        "random = noise vector baseline."
     )
     
     header_lines = [
         table_md,
         "",
         caption,
+        methods_note,
     ]
 
     # FIXME, we should have a simple table with simple names

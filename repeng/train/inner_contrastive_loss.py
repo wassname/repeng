@@ -217,7 +217,7 @@ def contrastive_steering_loss_with_ref(
         loss_coh = softclamp_tanh(loss_coh, n=2)
         # Projection loss: ratio of signed projections (coef flips direction)
         proj_ratio = proj_pi_signed / (proj_ref_signed.abs() + eps)  # (b,) can be negative
-        loss_proj = torch.softplus(proj_ratio - 1.0, 1) # target ratio > 1
+        loss_proj = F.softplus(proj_ratio - 1.0, 1) # target ratio > 1
     else:
         raise ValueError(f"Invalid loss_type specified: {loss_type}")
 

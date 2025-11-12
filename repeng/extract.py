@@ -363,19 +363,10 @@ def read_representations(
     for layer in tqdm.tqdm(hidden_layers):
         h = act[layer].clone()
 
-        fim = 'improved_empirical'
-        if '_cov' in method:
-            fim = 'covariance'
-        elif "_emp" in method:
-            fim = 'empirical'
         
         # Only access grads if needed
-        if needs_grads:
-            grad_matrix = grads[layer].clone()
-            dim = grad_matrix.shape[-1]
-        else:
-            grad_matrix = None
-            dim = None
+        grad_matrix = None
+        dim = None
         
         if method == "svd_gradient":
             # For concept extraction, flip negative gradients
@@ -385,92 +376,6 @@ def read_representations(
             # TODO importance sampling from logprobs
             directions[layer] = _choose_sign_from_grads(directions[layer], grad_matrix).unsqueeze(0)  # [1, d]
         
-        elif "fisher_steer" in method:
-            low_dim=None
-
-
-
-            lambda_reg = 1e-2
-            if '_reg0' in method:
-                lambda_reg = 0.0
-            elif '_reg1' in method:
-                lambda_reg = 1e-1
-            elif '_reg2' in method:
-                lambda_reg = 1e-2
-            elif '_reg3' in method:
-                lambda_reg = 1e-3
-            elif '_reg4' in method:
-                lambda_reg = 1e-4
-            elif '_reg5' in method:
-                lambda_reg = 1e-5
-
-            if '_dual' in method:
-                # Separate Fisher for pos/neg
-                grad_pos = grad_matrix[::2]   # [n/2, dim]
-                grad_neg = grad_matrix[1::2]  # [n/2, dim]
-                if feat_grad_norms is not None and feat_grad_norms[layer] is not None:
-                    norms_pos = feat_grad_norms[layer][::2]
-                    norms_neg = feat_grad_norms[layer][1::2]
-                else:
-                    norms_pos = norms_neg = None
-                
-                # Two natural gradients
-                low_dim = None
-                v_pos = natural_gradient_steering(grad_pos, low_dim=low_dim, fim=fim, grad_norms=norms_pos)
-                v_neg = natural_gradient_steering(grad_neg, low_dim=low_dim, fim=fim, grad_norms=norms_neg)
-
-                if '_pos' in method:
-                    directions[layer] = v_pos
-                elif '_neg' in method:
-                    directions[layer] = v_neg
-                elif '_diff' in method:
-                    # Difference: pos - neg
-                    directions[layer] = v_pos - v_neg
-                else:
-                    # Combine: pos direction and neg direction
-                    directions[layer] = (v_pos + v_neg) / 2.0
-            else:
-                directions[layer] = natural_gradient_steering(
-                    grad_matrix,
-                    low_dim=low_dim,
-                    fim=fim,
-                    grad_norms=feat_grad_norms[layer] if feat_grad_norms else None,
-                    lambda_reg=lambda_reg,
-                )
-
-            # # make sure the direction has positive personas as +ve (otherwise flip)
-            directions[layer] = _choose_sign_from_grads(directions[layer], grad_matrix).unsqueeze(0)  # [1, d]
-
-        elif method == "hvp_steer":
-            # Down-project for feasibility
-            low_dim = 128
-            if low_dim < dim:
-                rand_matrix = torch.randn(dim, low_dim, device=grad_matrix.device)
-                P, _ = torch.linalg.qr(rand_matrix, mode="reduced")
-                grad_proj = grad_matrix @ P  # [batch, low_dim]
-                mean_grad_proj = grad_proj.mean(0)  # [low_dim]
-            else:
-                P = torch.eye(dim, device=grad_matrix.device)
-                mean_grad_proj = grad_matrix.mean(0)
-            
-            # Compute HVP: grad of (grad @ mean_grad_proj) w.r.t. inputs (finite diff approx for speed)
-            # Dummy forward: treat mean_grad_proj as vector, compute directional deriv
-            def compute_hvp(v, grads):
-                # Finite difference HVP approx: [grad(f(x + eps v)) - grad(f(x - eps v))] / (2 eps)
-                eps = 1e-4
-                # For simplicity, use autograd on a linear proxy: H ≈ 2 * F (from Fisher)
-                # Better: Use torch.autograd.grad for second-order
-                hvp = torch.autograd.grad(
-                    outputs=(grads @ v).sum(),
-                    inputs=grads,
-                    create_graph=True,
-                    retain_graph=True
-                )[0].mean(0)  # Average over batch
-                return hvp @ P.T if low_dim < dim else hvp  # Up-project
-            
-            direction = compute_hvp(mean_grad_proj, grad_matrix)
-            directions[layer] = _choose_sign_from_grads(direction, grad_matrix).unsqueeze(0)  # [1, d]
-
         else: # PCA-based methods
             # run PCA on difference vectors between positive and negative examples
             train = h[::2] - h[1::2]

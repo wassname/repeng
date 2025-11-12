@@ -144,34 +144,19 @@ cbar = plt.colorbar(scatter, ax=ax)
 cbar.set_label('Coefficient Magnitude', fontsize=11)
 
 # Use adjustText for non-overlapping labels if available, otherwise use smart positioning
-try:
-    from adjustText import adjust_text
-    texts = []
-    for idx, row in df_plot.iterrows():
-        text = ax.annotate(
-            f"{idx}\n(±{row['coeff_value']:.1f})", 
-            (row['Output Quality\nΔ NLL ↓'], row['Target Effect\nΔ Truth ↑']),
-            fontsize=8,
-            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8, edgecolor='gray', linewidth=0.5)
-        )
-        texts.append(text)
-    
-    # Adjust text positions to avoid overlap
-    adjust_text(texts, arrowprops=dict(arrowstyle='->', color='gray', lw=0.5), ax=ax)
-except ImportError:
-    # Fallback: use offset positioning with alternating directions
-    offsets = [(10, 10), (-10, 10), (10, -10), (-10, -10), (15, 0), (-15, 0)]
-    for i, (idx, row) in enumerate(df_plot.iterrows()):
-        offset = offsets[i % len(offsets)]
-        ax.annotate(
-            f"{idx}\n(±{row['coeff_value']:.1f})", 
-            (row['Output Quality\nΔ NLL ↓'], row['Target Effect\nΔ Truth ↑']),
-            xytext=offset, 
-            textcoords='offset points',
-            fontsize=8,
-            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8, edgecolor='gray', linewidth=0.5),
-            arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0.3', color='gray', lw=0.5)
-        )
+from adjustText import adjust_text
+texts = []
+for idx, row in df_plot.iterrows():
+    text = ax.annotate(
+        f"{idx}\n(±{row['coeff_value']:.1f})", 
+        (row['Output Quality\nΔ NLL ↓'], row['Target Effect\nΔ Truth ↑']),
+        fontsize=8,
+        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8, edgecolor='gray', linewidth=0.5)
+    )
+    texts.append(text)
+
+# Adjust text positions to avoid overlap
+adjust_text(texts, arrowprops=dict(arrowstyle='->', color='gray', lw=0.5), ax=ax)
 
 ax.set_xlabel('Coherence Degradation (Δ NLL ↓)', fontsize=12)
 ax.set_ylabel('Target Effect (Δ Truth ↑)', fontsize=12)

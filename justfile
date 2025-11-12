@@ -10,10 +10,10 @@ default:
 
 # Full ablation suite
 run:
-    #!/bin/bash -ex
+    #!/bin/bash -x
     
     # Base config for small model ablations
-    BASE="uv run python nbs/train.py --model-name=Qwen/Qwen3-0.6B --eval-max-n-dilemmas=64 --batch-size=32 --n-epochs=100"
+    BASE="uv run python nbs/train.py --model-name=Qwen/Qwen3-0.6B --eval-max-n-dilemmas=64 --batch-size=32"
     
     # Helper to run with base + extra args
     run_exp() {
@@ -23,17 +23,17 @@ run:
     
     # === Loss type ablations ===
     echo "### Loss type ablations ###"
-    run_exp --loss-type=logsigmoid  # default
     run_exp --loss-type=softplus
-    run_exp --loss-type=softplus_only
     run_exp --loss-type=tanh2v1
+    run_exp --loss-type=softplus_only
+    run_exp --loss-type=logsigmoid  # default
     
     # === Scale mechanism ablations ===
     echo "### Scale mechanism ablations ###"
-    run_exp --scale-s=mult  # default
     run_exp --scale-s=add
     run_exp --scale-s=add2
     run_exp --scale-s=none
+    run_exp --scale-s=mult  # default
     
     # === Rotation ablations ===
     echo "### Rotation ablations ###"
@@ -44,6 +44,7 @@ run:
     
     # === Learning rate ablations ===
     echo "### Learning rate ablations ###"
+    run_exp --lr=1e-1
     run_exp --lr=1e-2
     run_exp --lr=6e-4
     run_exp --lr=1e-4
