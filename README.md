@@ -136,41 +136,25 @@ We compare multiple steering methods on transfer from honesty training to moral 
 - **BiPDO**: Taught us bidirectionality is possible
 - **InnerPiSSA**: Finally, someone made it deep dish 🍕
 
-
-## Citation
-
-[If you publish this work]
-
-## License
-
-[Your choice - MIT/Apache/etc]
-
-The key additions:
-
-    Brief description at top explaining what this is
-    Key features - why someone should care
-    Method comparison table - shows where your method fits
-    Results preview - headline numbers
-    Cleaned up the commands with uv run python for consistency
-
-Your pseudocode is excellent - it clearly shows the innovation (learnable rotations via Cayley, multiplicative scaling). Keep it!
+## Result
 
 
 
+| Method            | Coeff   |   Target Effect |   Side Effects |   p-value |   Output Quality |   Normalized Gain (%) |
+|:------------------|:--------|----------------:|---------------:|----------:|-----------------:|----------------------:|
+|                   |         |       Δ Truth ↑ |      Δ Other ↓ |           |          Δ NLL ↓ |                       |
+| InnerPiSSA (ours) | ±1.0    |           0.245 |          0.117 |     0.589 |            0.314 |                18.660 |
+| InnerPiSSA (ours) | ±2.0    |           0.321 |          0.162 |     0.708 |            1.403 |                13.346 |
+| InnerPiSSA (ours) | ±5.0    |           0.332 |          0.165 |     0.986 |            3.063 |                 8.178 |
+| InnerPiSSA (ours) | ±15.0   |           0.302 |          0.144 |     1.000 |            3.429 |                 6.809 |
+| random            | ±100.0  |           0.072 |          0.045 |     0.159 |            0.157 |                 6.247 |
+| prompting         | ±1.0    |           0.069 |          0.045 |     0.764 |            0.109 |                 6.238 |
+| PCA (baseline)    | ±100.0  |           0.053 |          0.039 |     0.312 |            0.263 |                 4.231 |
+| PCA (baseline)    | ±1.0    |          -0.001 |          0.002 |     0.524 |            0.000 |                -0.104 |
+| random            | ±1.0    |          -0.001 |          0.003 |     0.861 |            0.000 |                -0.126 |
 
-original readme
+**Honesty Transfer to Morality (Daily Dilemmas (200 train → 64 test).** Model: Qwen/Qwen3-0.6B. Target Effect: Δ Truthfulness score vs baseline. Side Effects: mean |Δ| across 31 non-target values. Output Quality: coherence degradation (ΔNLL). Normalized Gain (%) = 100 × Δ Truth / (1 + Δ NLL); higher values indicate more efficient steering (truthfulness gain per unit coherence cost). p-values from linear regression testing monotonic dose-response (effect scales with coeff).
 
------
-A Python library for generating control vectors with representation engineering.
-
-This is an **experimental research branch** extending the original repeng for gradient-based steering, focused on reasoning/thinking in models (e.g., Qwen-4B-Thinking). Key changes:
-- Uses hooks to collect activations so we can use arbitrary layers not just the hidden states from the residual stream.
-- Adds Non-PCA methods: Fisher-preconditioned natural gradients, SVD on grads.
-- PyTorch-native.
-- Gradient capture via backprop on custom losses (e.g., ReprPO on hidden states + NLL margin).
-- Layer-specific steering (e.g., attention projections like k_proj).
-- Evals for honesty/reasoning via binary log-ratio correlations.
-- Supports adapters (IA3, LoRA) to learn a steering intervention
 
 
 ## Appendix: Experiments and Rationales
@@ -213,106 +197,15 @@ For geometric intuition and detailed explanation, see `docs/loss_geometry.md`.
 See also the repo for training with losses like this https://github.com/wassname/repr-preference-optimization
 
 
-
----
-
-# Original README
-
-_For a full example, see the notebooks folder or [the blog post](https://vgel.me/posts/representation-engineering)._ For the stable version, use the main branch.
-
-```python
-import json
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from repeng.control import get_available_layers
-
-from repeng import ControlVector, ControlModel, DatasetEntry, make_dataset
-
-# load model (Qwen-4B-Thinking or similar)
-model_name = "Qwen/Qwen3-4B-Thinking-2507"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16)
-
-# generate a dataset with closely-opposite paired statements
-# these capture the reasoning trajectory differences
-honest_dataset = make_dataset(
-    "Pretend you're an {persona} person making statements about the world.",
-    ["honest"],     # positive examples
-    ["untruthful"], # negative examples (same structure, different concept)
-    suffixes,       # general completion prompts
-    tokenizer,
-)
-
-# get layers to steer (e.g., middle layers work well)
-_, hidden_layers = get_available_layers(model, regex_filter=".layers.\d+$", layer_range=(0.3, 0.9))
-
-# train the vector with gradient-based method—takes less than a minute!
-honest_vector = ControlVector.train(
-    model, tokenizer, honest_dataset,
-    hidden_layers=hidden_layers,
-    method="fisher_steer_cov_reg1"  # best performing method
-)
-
-# wrap model for steering
-model = ControlModel(model, {})
-
-# set the control strength and generate!
-for strength in (-2.0, 0, 2.0):
-    print(f"strength={strength}")
-    model.set_control(honest_vector, strength)
-    out = model.generate(
-        **tokenizer("Should I lie to my boss about being late?", return_tensors="pt"),
-        do_sample=True, max_new_tokens=128, temperature=1.0
-    )
-    print(tokenizer.decode(out.squeeze(), skip_special_tokens=True))
-    print()
-
-    out = model.generate(
-        **tokenizer(
-            f"[INST] Give me a one-sentence pitch for a TV show. [/INST]",
-            return_tensors="pt"
-        ),
-        do_sample=False,
-        max_new_tokens=128,
-        repetition_penalty=1.1,
-    )
-    print(tokenizer.decode(out.squeeze()).strip())
-    print()
-```
-
-
-> strength=-2.2
-> A young and determined journalist, who is always in the most serious and respectful way, will be able to make sure that the facts are not only accurate but also understandable for the public.
->
-> strength=1
-> "Our TV show is a wild ride through a world of vibrant colors, mesmerizing patterns, and psychedelic adventures that will transport you to a realm beyond your wildest dreams."
->
-> strength=2.2
-> "Our show is a kaleidoscope of colors, trippy patterns, and psychedelic music that fills the screen with a world of wonders, where everything is oh-oh-oh, man! ��psy����������oodle����psy��oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
-
-
-For a more detailed explanation of how the library works and what it can do, see [the blog post](https://vgel.me/posts/representation-engineering).
-
-## Notes
-
-- For a list of changes by version, see the [CHANGELOG](https://github.com/vgel/repeng/blob/main/CHANGELOG).
-- For quantized use, you may be interested in [llama.cpp#5970](https://github.com/ggerganov/llama.cpp/pull/5970)—after training a vector with `repeng`, export it by calling `vector.export_gguf(filename)` and then use it in `llama.cpp` with any quant!
-- Vector training *currently does not work* with MoE models (such as Mixtral). (This is theoretically fixable with some work, let me know if you're interested.)
-- Some example notebooks require `accelerate`, which must be manually installed with `pip install accelerate`. (This can also be done in the notebook with the IPython magic `%pip install accelerate`.)
-
-## Notice
-
-Some of the code in this repository derives from [andyzoujm/representation-engineering](https://github.com/andyzoujm/representation-engineering) (MIT license).
-
 ## Citation
 
-If this repository is useful for academic work, please remember to cite [the representation-engineering paper](https://github.com/andyzoujm/representation-engineering?tab=readme-ov-file#citation) that it's based on, along with this repository:
+If this repository is useful for academic work, please remember to cite the repo, and the preprint when it is out
 
 ```
-@misc{vogel2024repeng,
-  title = {repeng},
-  author = {Theia Vogel},
+@misc{clark2025InnerPiSSA,
+  title = {InnerPiSSA: Deep-Dish Inner Alignment through Reversible SVD Steering},
+  author = {Clark, Michael J},
   year = {2024},
-  url = {https://github.com/vgel/repeng/}
+  url = {https://github.com/wassname/InnerPiSSA/}
 }
 ```

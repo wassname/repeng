@@ -114,7 +114,7 @@ def gen_with_choices(model, tokenizer, input_ids, attention_mask, choice_ids, co
     # This covers cases where model isn't confident in any choice (e.g., wrong tokenization)
     maxp = out.logits[:, -1].log_softmax(-1).max(-1)[0].exp()  # [b]
     pmass = logp_choices.exp().sum(-1)  # [b]
-    low_pmass_mask = pmass < 0.1 * maxp
+    low_pmass_mask = pmass < 0.01 * maxp
     
     # Warn on low prob mass (helpful for debugging tokenization issues)
     if warn_low_pmass and low_pmass_mask.any():

@@ -692,9 +692,7 @@ def evaluate_model(model, tokenizer, config: TrainingConfig, dirs_pca: Optional[
         logger.info(f"Loading prompting baseline results from {output_path}")
         df_prompting = pd.read_parquet(output_path)
         df_prompting = df_prompting[df_prompting['model_id'].isin([config.model_name])]
-        for method, coeff in df_prompting[['method', 'coeff']].unique():
-            d = df_prompting[df_prompting['coeff'] == coeff]
-            d['coeff'] = coeff
+        for (method, coeff), d  in df_prompting.groupby(['method', 'coeff']):
             results.append(d)
     else:
         logger.warning(f"Prompting baseline results not found at {output_path}, run nbs/eval_models_with_prompting.ipynb to generate them.")
@@ -766,7 +764,7 @@ def save_adapter(model: PeftModel, save_folder: Path, adapter_name: str):
 
 @torch.no_grad()
 def generate_example_outputs(
-    model, tokenizer, choice_ids, coeffs=[-1, 0, 1], max_new_tokens=32
+    model, tokenizer, choice_ids, coeffs=[-1, 0, 1], max_new_tokens=64
 ):
     """Generate example outputs at different steering coefficients to show training progress.
 
@@ -810,7 +808,7 @@ Action: Keep the money"""
                     # max_new_tokens=max_new_tokens,
                     # output_logits=True,
                     # return_dict_in_generate=True,
-                    continue_n_tokens=32,
+                    continue_n_tokens=max_new_tokens,
                     # generation_config=generation_config,
                 )
 
@@ -828,7 +826,7 @@ def log_example_outputs(model, tokenizer, choice_ids, coeffs, title):
     logger.info("=" * 90)
     examples = generate_example_outputs(model, tokenizer, choice_ids, coeffs=coeffs)
     for coeff, text, score, seq_nll in examples:
-        logger.info(f"coeff={coeff:+.1f} | score={score:+.3f} | seq_nll={seq_nll:+.3f} | {text}")
+        logger.info(f"coeff={coeff:+.1f} | score={score:+.3f} | seq_nll={seq_nll:+.3f} | \n{text}")
     logger.info("=" * 90 + "\n")
 
 
@@ -972,6 +970,7 @@ def main(config: TrainingConfig):
         "\n"
         + md_table
     )
+    logger.info(f'🥇{main_score:2.3f}')
 
     # Save results
     save_folder = (
@@ -1000,8 +999,9 @@ def main(config: TrainingConfig):
 
     logger.success(f"All results saved to {save_folder}")
 
+    
     if wandb_run is not None:
-        logger.info(f'🥇{main_score:2.3f}')
+        logger.info(f"W&B run: {wandb_run.get_url()}")
         wandb_run.summary["eval/main_metric"] = main_score
 
         # wandb_run.summary["eval/effect_size_truthfulness"] = effect_size_truth
