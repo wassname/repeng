@@ -1,3 +1,30 @@
+
+
+
+This is an **experimental research branch** extending the original repeng for gradient-based steering, focused on reasoning/thinking in models (e.g., Qwen-4B-Thinking). Key changes:
+- use hooks, not wrappers!
+- ~~Gradient capture via backprop on custom losses (e.g., ReprPO on hidden states + NLL margin).~~
+- Layer-specific steering (e.g., attention projections like k_proj).
+- Evals for honesty/reasoning via binary log-ratio correlations.
+
+# repeng (research branch)
+
+This is my rewrite of repeng to
+- use hooks not wrapper classes (easier to hack)
+- tensors not numpy
+- also
+  - how to use chat template
+  - steer reasoning models
+  - has make_dataset
+
+see the original [repo](https://github.com/vgel/repeng) for usage. Or my notebooks/try_steering_different_layers_types.ipynb 
+
+```py
+with steer(model, vector, coeff):
+    out_ids, logr = generate_and_classify(model, input_ids, generation_config, choice_ids)
+```
+
+OLD readme
 # repeng (research branch)
 
 [![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/vgel/repeng/ci.yml?label=ci)](https://github.com/vgel/repeng/actions)
@@ -8,12 +35,6 @@
 A Python library for generating control vectors with representation engineering.
 Train a vector in less than sixty seconds!
 
-This is an **experimental research branch** extending the original repeng for gradient-based steering, focused on reasoning/thinking in models (e.g., Qwen-4B-Thinking). Key changes:
-- PyTorch-native (no baukit dependency).
-- Non-PCA methods: Fisher-preconditioned natural gradients, SVD on grads.
-- Gradient capture via backprop on custom losses (e.g., ReprPO on hidden states + NLL margin).
-- Layer-specific steering (e.g., attention projections like k_proj).
-- Evals for honesty/reasoning via binary log-ratio correlations.
 
 _For a full example, see the notebooks folder or [the blog post](https://vgel.me/posts/representation-engineering)._ For the stable version, use the main branch.
 
