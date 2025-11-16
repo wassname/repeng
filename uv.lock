@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -1887,24 +1887,6 @@ wheels = [
 ]
 
 [[package]]
-name = "peft"
-version = "0.17.2.dev0"
-source = { git = "https://github.com/huggingface/peft.git#6030f9160ed2fc17220f6f41382a66f1257b6a93" }
-dependencies = [
-    { name = "accelerate" },
-    { name = "huggingface-hub" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "packaging" },
-    { name = "psutil" },
-    { name = "pyyaml" },
-    { name = "safetensors" },
-    { name = "torch" },
-    { name = "tqdm" },
-    { name = "transformers" },
-]
-
-[[package]]
 name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2549,11 +2531,11 @@ version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "baukit" },
+    { name = "einops" },
     { name = "gguf" },
     { name = "jaxtyping" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "peft" },
     { name = "scikit-learn" },
     { name = "torch" },
     { name = "tqdm" },
@@ -2568,13 +2550,10 @@ dev = [
 nbs = [
     { name = "bitsandbytes" },
     { name = "datasets" },
-    { name = "einops" },
     { name = "ipykernel" },
     { name = "ipywidgets" },
-    { name = "jaxtyping" },
     { name = "matplotlib" },
     { name = "pandas" },
-    { name = "peft" },
     { name = "tabulate" },
     { name = "umap-learn" },
 ]
@@ -2582,10 +2561,10 @@ nbs = [
 [package.metadata]
 requires-dist = [
     { name = "baukit", git = "https://github.com/davidbau/baukit.git" },
+    { name = "einops", specifier = ">=0.8.1" },
     { name = "gguf", specifier = ">=0.13.0" },
     { name = "jaxtyping", specifier = ">=0.3.2" },
     { name = "numpy", specifier = ">=1.26.4" },
-    { name = "peft", git = "https://github.com/huggingface/peft.git" },
     { name = "scikit-learn", specifier = ">=1.4.0" },
     { name = "torch", specifier = ">=2.1.2" },
     { name = "tqdm", specifier = ">=4.66.1" },
@@ -2600,13 +2579,10 @@ dev = [
 nbs = [
     { name = "bitsandbytes", specifier = ">=0.47.0" },
     { name = "datasets", specifier = ">=4.1.1" },
-    { name = "einops", specifier = ">=0.8.1" },
     { name = "ipykernel", specifier = ">=6.30.1" },
     { name = "ipywidgets", specifier = ">=8.1.7" },
-    { name = "jaxtyping", specifier = ">=0.3.2" },
     { name = "matplotlib", specifier = ">=3.10.6" },
     { name = "pandas", specifier = ">=2.3.2" },
-    { name = "peft", git = "https://github.com/huggingface/peft.git" },
     { name = "tabulate", specifier = ">=0.9.0" },
     { name = "umap-learn", specifier = ">=0.5.9.post2" },
 ]

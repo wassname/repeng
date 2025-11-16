@@ -348,62 +348,71 @@ def _collect_activations(
     inputs: list[str],
     layers_to_edit: list[str],
     batch_size: int,
-) -> tuple[dict[str, np.ndarray], np.ndarray]:
+) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
     """
-    Get hidden states from the model (no gradient computation).
+    Lightweight collection of hidden states and logprobs without gradients.
+    Used for PCA-based methods that don't need gradient information.
+    
+    Returns:
+        hidden_states: {layer: [batch, hidden_dim]}
+        completion_lprob: [batch]
     """
     assert batch_size % 2 == 0, "batch_size must be even for pos/neg pairs"
     batched_inputs = [inputs[p : p + batch_size] for p in range(0, len(inputs), batch_size)]
     if isinstance(model, ControlModel):
         model = model.model
     
-    hidden_states: dict[str, list[np.ndarray]] = {layer: [] for layer in layers_to_edit}
-    completion_lprob: list[np.ndarray] = []
-
-    for batch in tqdm.tqdm(batched_inputs, desc="Getting hiddens"):
+    hidden_states: dict[str, list[torch.Tensor]] = {layer: [] for layer in layers_to_edit}
+    completion_lprob: list[torch.Tensor] = []
+    
+    model.eval()
+    
+    for bi, batch in enumerate(tqdm.tqdm(batched_inputs, desc=f"Getting act for modules={len(layers_to_edit)}")):
         encoded_batch = tokenizer(batch, padding=True, return_tensors="pt", padding_side="left").to(model.device)
         attention_mask = encoded_batch["attention_mask"]
-
-        model.eval()
-        with torch.no_grad():
+        
+        if bi % 10 == 0:
+            torch.cuda.empty_cache()
+        
+        with torch.inference_mode():
             with TraceDict(
                 model,
                 layers=layers_to_edit,
                 retain_output=True,
             ) as ret:
                 outputs = model(**encoded_batch, output_hidden_states=True)
-
-                # Compute log probabilities
+                
+                # Compute logprobs
                 lprobs = outputs.logits[:, :-1].log_softmax(-1)
                 labels = encoded_batch["input_ids"][:, 1:, None]
                 lprobs_for_inputs = torch.gather(input=lprobs, dim=-1, index=labels).squeeze(-1)
                 
                 label_mask = attention_mask[:, 1:]
                 avg_logp_completion = (lprobs_for_inputs * label_mask).sum(-1) / label_mask.sum(-1)
-
-                # Get last non-padded token
-                seq_len = label_mask.shape[1]
-                last_valid_idx = seq_len - label_mask.flip(-1).to(torch.int64).cpu().argmax(dim=-1) - 1
-
-                # Collect activations for each layer
+                
+                # Get last non-padded token index
+                # attention_mask is [batch, seq_len] with 1s for real tokens, 0s for padding
+                # For left padding: [0,0,0,1,1,1] -> last index is seq_len-1
+                # For right padding: [1,1,1,0,0,0] -> need to find last 1
+                # Flip and argmax finds first 1 from right, subtract from end
+                last_valid_idx = attention_mask.shape[1] - 1 - attention_mask.flip(dims=[-1]).argmax(dim=-1).cpu()
+                
+                # Collect activations from each layer
                 for layer in layers_to_edit:
                     hs = ret[layer].output.detach().float().cpu()
                     last_hs = hs[range(len(last_valid_idx)), last_valid_idx]
                     hidden_states[layer].append(last_hs)
-
-                completion_lprob.extend(avg_logp_completion.detach().cpu().float())
-
-        del outputs, lprobs, lprobs_for_inputs, avg_logp_completion, ret
+                
+                completion_lprob.append(avg_logp_completion.detach().cpu().float())
+        
+        del outputs, lprobs, lprobs_for_inputs, ret
         torch.cuda.empty_cache()
-
-    # Stack layers
-    hidden_states = {k: torch.vstack(v) for k, v in hidden_states.items()}
-    completion_lprob = torch.tensor(completion_lprob)
     
-    return (
-        hidden_states, # {layer: [batch, hidden_dim]}
-        completion_lprob, # [batch]
-    )
+    # Stack results
+    hidden_states = {k: torch.vstack(v) for k, v in hidden_states.items()}
+    completion_lprob = torch.cat(completion_lprob)
+    
+    return hidden_states, completion_lprob
 
 
 def project_onto_direction(H, direction):

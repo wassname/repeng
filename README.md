@@ -16,6 +16,7 @@ This is my rewrite of repeng to
   - how to use chat template
   - steer reasoning models
   - has make_dataset
+- collect grads (this really slow it down) TODO remove
 
 see the original [repo](https://github.com/vgel/repeng) for usage. Or my notebooks/try_steering_different_layers_types.ipynb 
 

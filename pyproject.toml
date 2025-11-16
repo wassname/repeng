@@ -14,7 +14,7 @@ dependencies = [
     "gguf>=0.13.0",
     "baukit",
     "jaxtyping>=0.3.2",
-    "peft",
+    "einops>=0.8.1",
 ]
 
 [dependency-groups]
@@ -26,14 +26,11 @@ nbs = [
     "matplotlib>=3.10.6",
     "pandas>=2.3.2",
     "umap-learn>=0.5.9.post2",
-    "jaxtyping>=0.3.2",
     "ipykernel>=6.30.1",
     "ipywidgets>=8.1.7",
     "bitsandbytes>=0.47.0",
     "tabulate>=0.9.0",
-    "peft>=0.17.1",
     "datasets>=4.1.1",
-    "einops>=0.8.1",
 ]
 
 [tool.pytest.ini_options]
@@ -42,7 +39,6 @@ markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
 
 [tool.uv.sources]
 baukit = { git = "https://github.com/davidbau/baukit.git" }
-peft = { git = "https://github.com/huggingface/peft.git" }
 
 [build-system]
 requires = ["hatchling"]
