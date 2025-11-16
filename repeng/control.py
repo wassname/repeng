@@ -139,7 +139,7 @@ class ControlModule(torch.nn.Module):
         super().__init__()
         self.block: torch.nn.Module = block
         self.params: BlockControlParams = BlockControlParams.default()
-        self.attention_type = getattr(self.block, 'full_attention')  # For compatibility with some models
+        self.attention_type = getattr(self.block, 'attention_type', 'full_attention')  # For compatibility with some models
 
     def set_control(self, params: BlockControlParams) -> None:
         self.params = params
