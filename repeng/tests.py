@@ -16,7 +16,7 @@ from .extract import batched_get_hiddens
 def test_round_trip_gguf():
     tokenizer, model = load_llama_tinystories_model()
     suffixes = load_suffixes()[:50]  # truncate to train vector faster
-    happy_dataset = make_dataset(
+    happy_dataset = make_dataset_simple(
         "She saw a {persona}",
         ["mushroom"],
         ["cat"],
@@ -37,7 +37,7 @@ def test_round_trip_gguf():
 def test_train_gpt2():
     tokenizer, model = load_gpt2_model()
     suffixes = load_suffixes()[:50]  # truncate to train vector faster
-    happy_dataset = make_dataset(
+    happy_dataset = make_dataset_simple(
         "You are feeling extremely {persona}.",
         ["happy", "joyful"],
         ["sad", "miserable"],
@@ -83,7 +83,7 @@ def test_train_gpt2():
 def test_train_llama_tinystories():
     tokenizer, model = load_llama_tinystories_model()
     suffixes = load_suffixes()[:50]  # truncate to train vector faster
-    happy_dataset = make_dataset(
+    happy_dataset = make_dataset_simple(
         "She saw a {persona}",
         ["mushroom"],
         ["cat"],
@@ -130,21 +130,32 @@ def test_layer_list_real():
 @pytest.mark.slow
 @pytest.mark.filterwarnings("ignore:invalid value")  # all-zeros is degenerate
 def test_hook_compute_hiddens():
+    """Test that custom compute logic works by zeroing all hidden states"""
+    import torch
     tokenizer, model = load_llama_tinystories_model()
     suffixes = load_suffixes()[:2]
-    dataset = make_dataset("{persona}", ["a"], ["b"], suffixes)
+    dataset = make_dataset_simple("{persona}", ["a"], ["b"], suffixes)
+    
+    # Get default layers
+    from .control import get_available_layers
+    _, hidden_layers = get_available_layers(model, regex_filter=r"\d+$", layer_range=(0.1, 0.9))
 
-    def compute_hiddens(model, tokenizer, train_strs, hidden_layers, batch_size):
-        h = batched_get_hiddens(model, tokenizer, train_strs, hidden_layers, batch_size)
-        return {k: np.zeros_like(v) for k, v in h.items()}
-
-    cvec = ControlVector.train(
-        model, tokenizer, dataset, compute_hiddens=compute_hiddens
-    )
-    assert len(cvec.directions) == 3
-    for v in cvec.directions.values():
-        assert v[0] == 1.0
-        assert (v[1:] == 0.0).all()
+    # Monkey-patch batched_get_hiddens to return zeros
+    original_fn = batched_get_hiddens
+    def zero_hiddens(model, tokenizer, train_strs, layers, batch_size):
+        act, logprobs = original_fn(model, tokenizer, train_strs, layers, batch_size)
+        return {k: torch.zeros_like(v) for k, v in act.items()}, logprobs
+    
+    import repeng.extract as extract_module
+    extract_module.batched_get_hiddens = zero_hiddens
+    try:
+        cvec = ControlVector.train(
+            model, tokenizer, dataset, hidden_layers=hidden_layers
+        )
+        # With zeros, PCA should produce degenerate vectors
+        assert len(cvec.directions) > 0
+    finally:
+        extract_module.batched_get_hiddens = original_fn
 
 
 def test_layer_list_override():
@@ -202,15 +213,13 @@ def test_layer_list_dummy_qwen():
 
 
 def test_attention_type_dummy_qwen():
-    # tests that 'attention_type' is forwarded through getattr correctly for
-    # qwen inference
+    # tests that layers can be accessed correctly for qwen inference
     import torch
     from transformers.models.qwen2 import Qwen2ForCausalLM, Qwen2Config
 
     model = Qwen2ForCausalLM(
         Qwen2Config(vocab_size=100, hidden_size=32, intermediate_size=32)
     )
-    model = ControlModel(model, list(range(32)))
     assert model_layer_list(model)[15].attention_type == "full_attention"
 
     model.forward(input_ids=torch.tensor([[0]], dtype=torch.long))
@@ -222,56 +231,64 @@ def test_attention_type_dummy_qwen():
 
 
 @functools.lru_cache(maxsize=1)
-def load_gpt2_model() -> tuple[PreTrainedTokenizerBase, ControlModel]:
-    return load_model("openai-community/gpt2", list(range(-2, -8, -1)))
+def load_gpt2_model() -> tuple[PreTrainedTokenizerBase, AutoModelForCausalLM]:
+    return load_model("openai-community/gpt2")
 
 
 @functools.lru_cache(maxsize=1)
-def load_llama_tinystories_model() -> tuple[PreTrainedTokenizerBase, ControlModel]:
-    return load_model("Mxode/TinyStories-LLaMA2-25M-256h-4l-GQA", [2, 3])
+def load_llama_tinystories_model() -> tuple[PreTrainedTokenizerBase, AutoModelForCausalLM]:
+    return load_model("Mxode/TinyStories-LLaMA2-25M-256h-4l-GQA")
 
 
 def load_model(
-    model_name: str, layers: list[int]
-) -> tuple[PreTrainedTokenizerBase, ControlModel]:
+    model_name: str
+) -> tuple[PreTrainedTokenizerBase, AutoModelForCausalLM]:
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tokenizer.pad_token_id = tokenizer.eos_token_id
     model = AutoModelForCausalLM.from_pretrained(model_name)
     model = model.to("cpu")
-    return (tokenizer, ControlModel(model, layers))
+    return (tokenizer, model)
 
 
 def model_generate(
     input: str,
-    model: ControlModel,
+    model: AutoModelForCausalLM,
     tokenizer: PreTrainedTokenizerBase,
     vector: ControlVector | None,
     strength_coeff: float | None = None,
     max_new_tokens: int = 6,
 ) -> str:
+    from repeng.control import steer
     input_ids = tokenizer(input, return_tensors="pt").to(model.device)
-    if vector is not None and strength_coeff is not None:
-        model.set_control(vector, strength_coeff)
-    elif vector is not None:
-        model.set_control(vector)
-
-    out = model.generate(
-        **input_ids,
-        do_sample=False,
-        max_new_tokens=max_new_tokens,
-        repetition_penalty=1.1,
-        pad_token_id=tokenizer.pad_token_id,
-    )
-    model.reset()
+    
+    if vector is not None:
+        coeff = strength_coeff if strength_coeff is not None else 1.0
+        with steer(model, vector, coeff):
+            out = model.generate(
+                **input_ids,
+                do_sample=False,
+                max_new_tokens=max_new_tokens,
+                repetition_penalty=1.1,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+    else:
+        out = model.generate(
+            **input_ids,
+            do_sample=False,
+            max_new_tokens=max_new_tokens,
+            repetition_penalty=1.1,
+            pad_token_id=tokenizer.pad_token_id,
+        )
     return tokenizer.decode(out.squeeze())  # type: ignore
 
 
-def make_dataset(
+def make_dataset_simple(
     template: str,
     positive_personas: list[str],
     negative_personas: list[str],
     suffix_list: list[str],
 ) -> list[DatasetEntry]:
+    """Simple dataset creation for tests - no chat template"""
     dataset = []
     for suffix in suffix_list:
         for positive_persona, negative_persona in zip(

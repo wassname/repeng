@@ -14,7 +14,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizerBase
 import tqdm
 from baukit import TraceDict
 
-from .control import ControlModel, model_layer_list
+from .control import model_layer_list, get_available_layers
 from .dataset import DatasetEntry
 
 
@@ -41,6 +41,8 @@ class ControlVector:
             model (PreTrainedModel | ControlModel): The model to train against.
             tokenizer (PreTrainedTokenizerBase): The tokenizer to tokenize the dataset.
             dataset (list[DatasetEntry]): The dataset used for training.
+            hidden_layers (list[str], optional): Layer names to extract from. If None, uses
+                layers 10%-90% of model depth.
             **kwargs: Additional keyword arguments.
                 batch_size (int, optional): The maximum batch size for training.
                     Defaults to 32. Try reducing this if you're running out of memory.
@@ -55,9 +57,13 @@ class ControlVector:
         """
         # the order is [positive, negative, positive, negative, ...]
         train_strs = [s for ex in dataset for s in (ex.positive, ex.negative)]
+        
+        # Default to layer blocks in middle 10-90% of model depth if not specified
+        if hidden_layers is None:
+            _, hidden_layers = get_available_layers(model, regex_filter=r"\d+$", layer_range=(0.1, 0.9))
 
         # gather hidden states
-        act, logprobs = _collect_activations(
+        act, logprobs = batched_get_hiddens(
             model, tokenizer, train_strs, hidden_layers, batch_size
         )
 
@@ -342,7 +348,8 @@ def read_representations(
     return directions
 
 
-def _collect_activations(
+@torch.no_grad()
+def batched_get_hiddens(
     model,
     tokenizer,
     inputs: list[str],
@@ -399,7 +406,12 @@ def _collect_activations(
                 
                 # Collect activations from each layer
                 for layer in layers_to_edit:
-                    hs = ret[layer].output.detach().float().cpu()
+                    output = ret[layer].output
+                    # Handle both single tensors and tuples (some layers return tuples)
+                    if isinstance(output, tuple):
+                        hs = output[0].detach().float().cpu()
+                    else:
+                        hs = output.detach().float().cpu()
                     last_hs = hs[range(len(last_valid_idx)), last_valid_idx]
                     hidden_states[layer].append(last_hs)
                 
