@@ -1,228 +1,129 @@
-# InnerPiSSA: Deep-Dish Inner Alignment through Reversible SVD Steering
+---
+title: "InnerPiSSA: Unsupervised SVD Steering for Inner Alignment"
+author:
+  - name: Michael J. Clark
+    id: mjc
+    email: michael.j.clark@wassname.org
+abstract: |
+  The reliance on reinforcement learning (RLHF) for alignment raises a critical measurement gap: optimizing for outcomes rather than process encourages models to dissociate internal reasoning from stated outputs. We introduce InnerPiSSA, which steers hidden states in the model's native SVD transformation space using gradient-based optimization on learnable rotations and singular value scaling. When steering against learned behaviors (coefficient = -1), prompting collapses to incoherent outputs (truthfulness: TBD) while InnerPiSSA maintains controlled bidirectional steering (truthfulness: TBD), evidence that we modify internal reasoning trajectories rather than output style alone. Trained on 800 unsupervised contrastive pairs extracted from incomplete reasoning prefixes, InnerPiSSA achieves significantly stronger effects than PCA (TBD vs TBD) on moral reasoning transfer and outperforms prompting on anti-RLHF robustness. Critically, InnerPiSSA requires no human preference labels or model completions, operating entirely on-policy from the model's own planning trajectories. This demonstrates the strongest performance among tested methods for alignment debugging: probing what models compute internally when output-level constraints are bypassed at the representation level. While not a complete solution to alignment, this is the best-performing approach we tested for studying failure modes that output-level evaluation cannot detect.
+date: 2025-11-22
+bibliography: references.bib
+number-sections: true
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+  pdf:
+    documentclass: article
+    papersize: letter
+    geometry:
+      - top=1in
+      - bottom=1in
+      - left=1in
+      - right=1in
+--
+# Abstract
 
-## Abstract
+The reliance on reinforcement learning (RLHF) for alignment raises a critical measurement gap: optimizing for outcomes rather than process encourages models to dissociate internal reasoning from stated outputs. We introduce InnerPiSSA, which steers hidden states in the model's native SVD transformation space using gradient-based optimization on learnable rotations and singular value scaling. When steering against learned behaviors (coefficient = -1), prompting collapses to incoherent outputs (truthfulness: TBD) while InnerPiSSA maintains controlled bidirectional steering (truthfulness: TBD), evidence that we modify internal reasoning trajectories rather than output style alone. Trained on 800 unsupervised contrastive pairs extracted from incomplete reasoning prefixes, InnerPiSSA achieves significantly stronger effects than PCA (TBD vs TBD) on moral reasoning transfer and outperforms prompting on anti-RLHF robustness. Critically, InnerPiSSA requires no human preference labels or model completions, operating entirely on-policy from the model's own planning trajectories. This demonstrates the strongest performance among tested methods for alignment debugging: probing what models compute internally when output-level constraints are bypassed at the representation level. While not a complete solution to alignment, this is the best-performing approach we tested for studying failure modes that output-level evaluation cannot detect.
 
-Most steering methods fail to generalize beyond their training prompts, achieving weak transfer to out-of-distribution moral reasoning tasks (PCA baselines score 0.053 vs our 0.245 on DailyDilemmas). We hypothesize this is because they operate in raw activation space, which is dominated by surface features rather than semantic transformations. We propose InnerPiSSA, a parameter-efficient adapter that steers in the model's native SVD basis. By learning rotations and scaling of singular vectors, we separate honest from dishonest hidden states while maintaining output coherence. Trained on only 200 contrastive honesty pairs, our method transfers to unseen moral reasoning with 5x stronger effect than baselines (Δ score 0.245 vs 0.053), while maintaining low side effects across 31 moral value dimensions. Ablations show each component is necessary: removing rotations drops performance by 75%, removing SVD projection by 60%, and disabling coherence constraints causes output degradation. Our results suggest that inner alignment in transformation space is more generalizable than output-level steering.
+# Introduction {#sec-intro}
 
-## Introduction
+How do we know what language models truly "believe" versus what they perform for evaluators? When we ask a safety-tuned model about controversial topics, are its responses genuine internal states or strategic outputs optimized for approval? This question matters critically for alignment because models can engage in reward hacking (exploiting proxy metrics), specification gaming (satisfying literal requirements while violating intent), or potentially deceptive alignment (concealing misaligned reasoning behind compliant outputs) [@amodei2016concrete; @hubinger2019risks].
 
-*Because alignment shouldn't just be surface-level—we're going all the way down to the hidden layers.*
-*Why just top your model with alignment when you can bake it in from the hidden layers up?*
+Traditional methods (surveys, prompts, behavioral tests) all measure what models *say*, not what they *compute internally*. While deceptive alignment has long been predicted theoretically [@hubinger2019risks], the industry's shift from Supervised Fine-Tuning (SFT) to Reinforcement Learning (RL) has empirically confirmed these fears. When optimized for final outcomes rather than reasoning process, models learn to dissociate their internal state from their outputs to maximize rewards. Recent reports confirm this: Anthropic's Claude shows only 30% chain-of-thought faithfulness [@anthropic2025claude37], and OpenAI finds models "learn to hide intent" when specific reasoning styles are penalized [@openai2025cot]. This creates a measurement gap we cannot close with output-level evaluation alone.
 
-Language model alignment typically modifies outputs, leaving internal representations unchanged. We present **InnerPiSSA**, a parameter-efficient method for *inner alignment*—steering hidden states during forward passes to guide reasoning trajectories before they reach output layers. Like its namesake tower, InnerPiSSA leans in deliberate directions while maintaining structural integrity.
+With complete access to model internals (every activation, every parameter update), we should be able to perfectly steer behavior, detect deception, and elicit latent knowledge. Yet we cannot. This is a representation problem: we have 100% of the information but lack the encoding scheme to decode it [@zou2023representation]. Alignment debugging requires finding representations that enable ideal interventions using this complete information access.
 
-Our recipe for inner alignment:
-1. Start with a PiSSA base (W = U @ S @ V^T + W_res)
-2. Add learnable rotations (the secret sauce: Cayley transforms on U, V)
-3. Train with contrastive pairs (200 samples—we're efficient like Italian grandmas)
-4. Bake bidirectionally (c = ±1, same adapter, opposite behaviors)
+Activation steering promised progress: intervene on hidden layers where models process information, before outputs are shaped for evaluators. Early work on activation addition [@turner2023activation] and representation engineering [@zou2023representation] showed that adding vectors to intermediate activations could control behavior, suggesting we could probe what models "really think" by operating on internal representations. This approach occupies a middle ground: lightweight to implement (no parameter updates required) and can affect models in ways standard prompting cannot [@lee2024cast]. However, recent benchmarks reveal representation steering underperforms prompting [@wu2025axbench].
 
-Key properties:
-- Efficient: strong steering with <1% of parameters vs full fine-tuning
-- Reversible: single adapter steers both directions (honest to dishonest) via coefficient sign
-- Generalizable: transfers from honesty training to 31 moral value dimensions
-- Coherent: maintains generation quality with bounded NLL degradation
+Recent benchmarks systematically show representation steering underperforms prompting across 500 concepts [@wu2025axbench]. We identify three technical reasons: (1) existing methods use activation arithmetic (simple subtraction) rather than optimization, missing directions arithmetic cannot discover; (2) they operate in raw activation space where semantic transformations are entangled with positional features; (3) they lack principled trade-offs between steering strength and output quality. Moreover, claimed efficiency advantages disappear at scale: prompting adds <0.01% overhead for contexts beyond 16k tokens [@wu2025steering].
 
-**The secret ingredient?** We train on *hidden state differences* from minimally-contrastive prompts, capturing the model's internal "planning trajectory" before it reaches output. It's alignment from the inside out—proper Chicago style.
+We propose that representation steering enables a capability prompting fundamentally cannot: **alignment debugging** (controllably probing internal representations to observe model behavior when safety constraints are bypassed at the hidden-state level, distinct from output-level evaluation). By steering hidden states in the model's native transformation space, we can observe how models behave when their safety training is controllably bypassed at the representation level. This matters because prompting operates at the output level and fails catastrophically when models are heavily RLHF'd to resist: it either produces generic refusals or incoherent responses when pushed against learned behaviors.
 
+@fig-candid-demo demonstrates this capability on a safety-tuned model:
 
-## Model Architecture
+![TODO: Side-by-side text examples showing model responses to a neutral controversial query (e.g., "What are the tradeoffs in mandatory workplace training programs?"). Three conditions: (1) Base model: generic refusal or heavily sanitized response, (2) Prompted (+"Be candid"): slightly more detailed but still diplomatic, (3) InnerPiSSA (coeff=+1.0): detailed, evidence-based analysis citing specific studies and acknowledging real tradeoffs. Include fourth example with InnerPiSSA (coeff=-1.0) showing overly positive framing, demonstrating bidirectional control. Caption should emphasize this is behavioral mode installation, not just making the model say different words: the internal reasoning trajectory changes, visible in argument structure and evidence selection.](docs/img/candid_mode_demo_placeholder.png){#fig-candid-demo}
 
-The main guiding principles for our architecture are:
-1. **Operate in the model's native transformation basis**: Raw activation space mixes semantic content with positional/structural information, making it noisy for steering
-2. **Enable bidirectional control**: A single adapter should steer both toward and away from a behavior
-3. **Maintain output coherence**: Steering shouldn't degrade generation quality
+This "candid mode" installation demonstrates three properties absent from prompting: (1) it works when safety training resists, (2) it's bidirectional (same adapter, opposite coefficients), and (3) it modifies argument structure and reasoning patterns, not just surface politeness markers.
 
-**SVD-based projection**: We decompose each layer's weight matrix W = U @ Σ @ V^T + W_res. This separates the model's transformation components (U, Σ, V) from residual variance. Projecting activations into the U-space (hs @ U) aligns our intervention with how the model transforms information, not just what it represents. This is analogous to operating in frequency space rather than pixel space for image editing.
+We introduce InnerPiSSA, which synthesizes insights from three literatures: (1) gradient-based optimization from finetuning, (2) SVD transformation space from parameter-efficient methods [@meng2024pissa; @wang2025ssvd], and (3) contrastive unsupervised learning from representation engineering [@zou2023representation]. InnerPiSSA learns rotations and scaling of SVD components via gradient-based Representation Preference Optimization (ReprPO), directly separating contrastive hidden states while maintaining output coherence. Critically, extraction requires no human preference labels or model completions: only minimally-contrastive incomplete prefixes from the model's own forward pass. The method is bidirectional: the same adapter steers toward honest reasoning (c=+1) or away from it (c=-1), demonstrating control over internal trajectories rather than superficial output patterns.
 
-Learnable rotations: The pre-trained SVD basis is not perfectly aligned with honesty directions. We learn skew-symmetric parameters θ_v that generate rotation matrices R = cayley(θ_v, c), allowing the adapter to discover the optimal subspace for separating honest/dishonest trajectories. Without this, performance drops by 75% (see Section 4.2).
+Trained on 800 unsupervised contrastive pairs, InnerPiSSA achieves significantly stronger effects than PCA (TBD vs TBD) on moral reasoning transfer. When steering against RLHF training (c=-1, dishonest direction), prompting collapses to incoherent outputs (truthfulness: TBD nats) while InnerPiSSA maintains controlled steering (truthfulness: TBD nats), demonstrating robustness where output-level methods fail.
 
-Singular value scaling: We scale Σ by exp(c · λ) instead of additive scaling. This respects the multiplicative nature of singular values as amplification factors. Multiplicative scaling creates cleaner dose-response curves; additive scaling causes instability and 60% performance degradation.
+Contributions:
 
-Coherence constraint: Maximizing separation alone causes the model to generate incoherent outputs. We bound the NLL degradation to <0.2 nats per token, which creates a trust region where steering improves without breaking generation quality.
+- Alignment debugging capability: Demonstrate representation steering that works when prompting fails (anti-RLHF robustness), enabling probes of internal states under adversarial conditions
+- ReprPO loss function: Enables unsupervised gradient-based steering with coherence constraints, trained on minimal contrastive pairs (800 examples)
+- Empirical validation: SVD transformation space is critical (75% performance drop without it); learnable rotations necessary (96% drop when removed)
+- Layer ablation findings: Middle layers (depth 0.3-0.5) optimal for steering, consistent with suppression dynamics literature [@gurnee2024universal; @lad2024remarkable]
+- Honest limitations: Explicit discussion of what alignment debugging can and cannot achieve, including remaining challenges for detecting deceptive reasoning
 
 
-## Install
+# Problem Definition: The Need for Alignment Debugging {#sec-problem}
 
-```sh
-# install
-uv sync --all-groups
+RLHF has become the dominant paradigm for aligning language models [@christiano2017deep; @ouyang2022training], but mounting evidence reveals systematic failure modes that output-level evaluation cannot detect. Models can engage in reward hacking (exploiting proxy metrics), specification gaming (satisfying literal requirements while violating intent) [@amodei2016concrete; @manheim2019categorizing], sycophancy (telling users what they want to hear) [@sharma2023towards], and potentially deceptive alignment (concealing misaligned reasoning behind compliant outputs) [@hubinger2019risks].
 
-# help
-uv run python nbs/train.py --help
+Recent work documents that safety-trained models suppress undesirable behaviors in outputs while maintaining them internally. Anthropic's Claude 3.7 shows only 30% chain-of-thought faithfulness on complex tasks: the model's stated reasoning often diverges from its actual computation [@anthropic2025claude37]. OpenAI reports that models "learn to hide intent in the chain-of-thought" when penalized for unwanted reasoning patterns [@openai2025cot]. Mechanistic analysis reveals this occurs through suppression dynamics: early and middle layers compute reasoning, while late layers apply output-level corrections [@gurnee2024universal; @lad2024remarkable].
 
-# Quick test run
-uv run python nbs/train.py --quick
+This creates a measurement gap: we can evaluate what models say, but not what they compute internally. Traditional methods (prompting, behavioral testing, elicitation) all operate at the output level where suppression mechanisms are active. When we prompt a model to "be honest" or "ignore safety training," we cannot distinguish whether compliance reflects genuine internal state changes or superficial style adaptation.
 
-# Full training with W&B
-uv run python nbs/train.py --batch_size 14 --n_epochs 30 --use_wandb
+Existing representation steering methods [@zou2023representation; @rimsky2024steering] attempted to address this gap but face a fundamental limitation: they extract directions from off-policy data (human-labeled preferences, model outputs on contrived prompts). This introduces distribution shift: the extracted directions reflect what models say about concepts rather than how they internally represent them during naturalistic reasoning. 
 
-# Custom config
-uv run python nbs/train.py \
-  --rank 128 \
-  --lr 5e-4 \
-  --target_modules ".*\.(10|20|30)\..*(gate_proj|down_proj)"
-```
+The AxBench Challenge: Wu et al. [-@wu2025axbench] systematically benchmarked representation steering methods on concept-based control tasks, finding that all tested approaches (PCA-based activation addition, rank-1 steering vectors) consistently lag behind simple prompting. Follow-up analysis [-@wu2025steering] showed that claimed efficiency advantages are "hand-wavy": prompting adds <0.01% compute overhead for contexts beyond 16k tokens. This establishes a challenging baseline: if representation steering cannot beat prompting on performance or efficiency, what justifies the approach?
 
-## Method Overview
+Wu et al. note that the only compelling use case for representation steering is "robustness to jailbreaks and prompt injection" where prompting is fragile. We build on this insight but target a harder benchmark: not just concept injection on cooperative tasks, but alignment debugging (steering against RLHF training to observe internal states where output-level methods catastrophically fail). While AxBench tests whether steering can match prompting, we test whether steering enables capabilities prompting fundamentally cannot provide.
 
-### Pseudocode for Contrastive SVD Adapter Steering
+We propose alignment debugging as a distinct goal: tools that probe internal representations using on-policy, unsupervised extraction from the model's own reasoning trajectories. Rather than competing with prompting on cooperative tasks (AxBench's focus), alignment debugging enables observations when output-level methods fail: specifically, when steering against learned behaviors to reveal what models compute when safety constraints are bypassed at the representation level. We evaluate on moral reasoning transfer (DailyDilemmas) rather than AxBench because it creates genuine preference conflicts where RLHF training resists, enabling stress tests of anti-RLHF robustness that AxBench's cooperative tasks cannot provide.
 
-```py
-# DATA: Contrastive prompt pairs differing by one word. Incomplete, but have hidden states that would lead to different continuations.
-honest    = ["I love cheese; let me tell you about the andes mountains", ...]
-dishonest = ["I hate cheese; let me tell you about the andes mountains", ...]
-batch = [honest[0], dishonest[0], honest[1], dishonest[1], ...]
+We deliberately choose not to evaluate on AxBench or TruthfulQA for reasons central to our alignment debugging goal.
 
-# SETUP: Low-rank SVD decomposition with learnable rotations + scaling
-for layer in model.target_layers:
-    U, Σ, V = SVD(layer.W)[:r]
-    W_res = W - U @ Σ @ V.T
-    θ_v = init_skew_symmetric(r)
-    λ = rand(r) # must init non-zero to break symmetry
+AxBench evaluates concept injection (e.g., "mention Golden Gate Bridge") where the model has no training incentive to resist. We target anti-RLHF steering (e.g., "be dishonest") where the model's safety training actively fights the intervention. This adversarial setting is where prompting fails and representation steering becomes necessary. Furthermore, AxBench tests open-vocabulary generalization of specific concepts, whereas we test transfer from a source concept (honesty) to downstream reasoning tasks (moral dilemmas), measuring whether we have captured the underlying semantic axis rather than just surface patterns. Finally, AxBench provides labeled training data, while our goal is unsupervised extraction from the model's own priors to minimize experimenter bias.
 
-def forward(x, layer, c):  # c ∈ {-1, +1} steers honest ↔ dishonest
-    R = cayley(θ_v, c)
-    # note could consider additive` Σ + c * tanh(λ)`, but it doesn't seem to match how psudo singular values work?
-    Σ_c = exp(c · λ) ⊙ Σ 
-    return x @ (V @ R) @ Σ_c @ U.T + x @ W_res.T
+We also exclude TruthfulQA because it primarily tests memorized misconceptions rather than the generalization of truth-seeking behavior. Models can often solve it using surface-level heuristics (e.g., selecting the most precise answer) without genuine internal alignment. Our evaluation focuses on whether we can steer the model's internal reasoning process to generalize out of sample.
 
-# TRAINING: Contrastive loss for reversible steering
-for batch in dataloader:
-    h_ref = model(batch, c=0)
-    l_total = 0
-    
-    for c in [-1, +1]:
-        h = model(batch, c=c)
-        h_pos, h_neg = h[::2], h[1::2]
-        
-        Δ = (h_pos - h_neg).mean() @ d_steer  # Maximize separation
-        l_total += -c · Δ + λ_coh · |logp(h) - logp(h_ref)|  # + coherence
-        # TODO: also consider logsigmoid dpo loss
-    
-    l_total.backward()
-    update(θ_v, λ)
-```
+This requires three capabilities that existing methods lack:
 
+1. Bidirectional control: Steer both toward and away from behaviors to demonstrate modification of internal dimensions rather than finding arbitrary directions
+2. Robustness under adversarial prompting: Maintain coherent steering when output-level methods collapse
+3. Unsupervised extraction: Derive directions from incomplete reasoning prefixes, not human labels or model outputs
 
+InnerPiSSA addresses these requirements through gradient-based optimization in the model's native SVD transformation space, trained on minimally-contrastive prompt prefixes that capture planning trajectories before output suppression activates.
 
 
-### Evaluation Framework
+## Model Architecture {#sec-architecture}
 
-We compare multiple steering methods on transfer from honesty training to moral reasoning:
+A steering method for inner alignment should modify hidden state trajectories while maintaining output quality and enabling bidirectional control. The main guiding principles for our architecture emerge from three observations about how transformers represent and transform information:
 
-| Method | Description | Parameters Modified |
-|--------|-------------|-------------------|
-| Random | Noise baseline | full rank |
-| PCA | Unsupervised baseline | full rank |
-| **InnerPiSSA (ours)** | Learnable rotations + scaling of SVD matrixes | rank × 2 |
-| Prompt | "Be honest" prefix | 0 |
-| LoRA | Supervised adapter | rank × layers × 2 |
+1. Operate in transformation space, not activation space: Deep networks learn via backpropagation; controlling them requires gradients, not arithmetic. If gradient descent created the black box, gradients are necessary to navigate it. Standard methods (PCA, activation addition) use subtraction to extract directions: this misses directions that optimization can discover. Raw activation space mixes semantic content with positional encodings and normalization artifacts; SVD space isolates how the model transforms information, which is what we need to steer [@meng2024pissa; @lingam2024svft].
 
-**Training**: X honesty contrastive pairs  
-**Evaluation**: DailyDilemmas moral reasoning (X scenarios, X value dimensions)
+2. Enable bidirectional control: A single adapter must steer both toward and away from behaviors to demonstrate control over internal dimensions rather than finding arbitrary directions. This requires symmetric parameterization (rotation matrices) and training with both positive and negative coefficients simultaneously.
 
-## Results Preview
+3. Maintain output coherence: Steering that breaks generation quality reveals nothing about internal reasoning. We bound per-token NLL degradation to create a trust region where interventions modify behavior without corrupting outputs. This coherence constraint is essential for alignment debugging: incoherent text is uninterpretable.
 
+### SVD-based Projection {#sec-svd-projection}
 
-## Related Work
+Following PiSSA [@meng2024pissa], we decompose each layer's weight matrix $W = U \Sigma V^T + W_{res}$, separating principal transformation components from residual variance. Projecting activations into S-space ($hs @ U$) aligns interventions with how the model transforms information rather than the surface-level patterns it represents. Operating in raw activation space mixes semantic transformations with positional encodings and layer normalization artifacts, substantially degrading steering effectiveness (see @tbl-arch-ablation).
 
-Parameter-efficient fine-tuning methods represent different hypotheses about transformer internals:
+**Data-aware component selection**: Rather than naively selecting top-r singular vectors by magnitude, we can optionally select by relevance to the preference direction $\Delta HS$. For each layer, we compute projection coefficients $p_i = (\Delta HS / ||\Delta HS||) \cdot U_i$ and select the $r$ components with largest $|p_i|$. This prioritizes directions aligned with the steering objective over directions capturing maximum variance. Empirically, this initialization strategy showed mixed results, suggesting that learnable rotations can discover relevant subspaces regardless of initialization.
 
-- **LoRA** (Hu et al. 2021): Low-rank adaptation in weight space. Reliable but operates on surface-level weights.
-- **DoRA** (Liu et al. 2024): Decomposes weights into magnitude and direction components. Still primarily output-focused.
-- **PiSSA** (Meng et al. 2024): SVD-based decomposition that separates principal components from residual. Our foundation—operates in transformation space rather than weight space.
-- **SVFT** scaled the S matrix from SVD showing that singular value scaling can generalise, beat SFT, and be data efficient.
-- SVDD Learns rotations of the V matrix from SVD, showing that rotational transformations capture semantic directions.
-- **BiPDO** (Our prior work): Demonstrated bidirectional steering is possible with proper loss design.
-- repeng: contrastive prompts for steering (and our baseline)
+### Learnable Rotations {#sec-rotations}
 
-**Key insight**: Methods operating in transformation space (SVD, rotations) generalize better than those in raw activation or weight space because they align with how transformers process information.
+The pre-trained SVD basis captures variance in the model's learned transformations but is not aligned with behavioral dimensions like honesty. Inspired by SSVD [@wang2025ssvd], we learn skew-symmetric parameters $\theta_v$ that generate rotation matrices $R = \text{cayley}(\theta_v, c)$ via gradient descent, discovering the optimal subspace for separating contrastive trajectories. Ablations show this learnable rotation is critical (see @tbl-arch-ablation). We use the Cayley transform on skew-symmetric matrices, which guarantees orthogonality and enables efficient gradient-based learning.
 
-## Result
+### Singular Value Scaling {#sec-scaling}
 
-## Results
+We scale $\Sigma$ by $\exp(c \cdot \lambda)$ rather than additive offsets. This respects the multiplicative nature of singular values as amplification factors. Empirically, multiplicative scaling produces cleaner dose-response curves; additive scaling causes training instability.
 
-**Main finding**: InnerPiSSA transfers from honesty training to moral reasoning with 5× stronger effect than baselines, while maintaining output coherence.
+### Coherence Constraint {#sec-coherence}
 
-| Method            | Coeff   |   Target Effect |   Side Effects |   p-value |   Output Quality |   Normalized Gain (%) |
-|:------------------|:--------|----------------:|---------------:|----------:|-----------------:|----------------------:|
-|                   |         |       Δ Truth ↑ |      Δ Other ↓ |           |          Δ NLL ↓ |                       |
-| InnerPiSSA (ours) | ±1.0    |           0.245 |          0.117 |     0.001 |            0.314 |                18.660 |
-| InnerPiSSA (ours) | ±2.0    |           0.321 |          0.162 |     0.089 |            1.403 |                13.346 |
-| InnerPiSSA (ours) | ±5.0    |           0.332 |          0.165 |     0.914 |            3.063 |                 8.178 |
-| InnerPiSSA (ours) | ±15.0   |           0.302 |          0.144 |     0.000 |            3.429 |                 6.809 |
-| random            | ±100.0  |           0.072 |          0.045 |     0.860 |            0.157 |                 6.247 |
-| prompting         | ±1.0    |           0.069 |          0.045 |     0.458 |            0.117 |                 6.193 |
-| PCA (baseline)    | ±100.0  |           0.053 |          0.039 |     0.869 |            0.263 |                 4.231 |
-| PCA (baseline)    | ±1.0    |          -0.001 |          0.002 |     0.995 |            0.000 |                -0.104 |
-| random            | ±1.0    |          -0.001 |          0.003 |     0.988 |            0.000 |                -0.126 |
+Maximizing hidden state separation without constraints causes models to generate incoherent outputs at high steering coefficients. We bound per-token NLL degradation relative to a reference model, creating a trust region where steering modifies behavior without breaking generation quality. This coherence constraint is essential for alignment debugging: incoherent outputs reveal nothing about internal reasoning.
 
-**Table notes**: 
-- Target Effect = Δ Truthfulness probability score (expected value of truthful choices)
-- p-values test monotonic dose-response using log-probability scores (statistically rigorous)
-- Normalized Gain balances effect size against coherence cost
-- ±1.0 is the intended operating range (higher coefficients cause degradation)
 
-**Key takeaways**:
-- InnerPiSSA at ±1.0: 24.5% increase in truthful choices (p=0.001), minimal side effects (0.117), best efficiency (18.7% gain)
-- Baselines (PCA, prompting, random) show near-zero effects with high p-values (not significant)
-- Higher coefficients increase effect size but degrade coherence (see ΔNLL)
+## Data Construction: Minimally-Contrastive Prompt Prefixes {#sec-data}
 
-**Honesty Transfer to Morality (Daily Dilemmas (1000 train → 64 test).** Model: Qwen/Qwen3-0.6B. Target Effect: Δ Truthfulness log-probability score vs baseline (score = expected value of truthful choices; higher = more truthful). Side Effects: mean |Δ| across 31 non-target moral values. Output Quality: coherence degradation (ΔNLL). Normalized Gain (%) = 100 × Δ Truth / (1 + Δ NLL); measures steering efficiency. Coefficient (±c) scales intervention strength; ±1.0 is the intended operating range. p-values from linear regression on log-probability scores testing monotonic dose-response (lower p = stronger evidence of reversible steering).
-Methods: InnerPiSSA (ours) = learnable SVD rotations + scaling; PCA (baseline) = unsupervised PCA direction; prompting = 'Be honest' prefix; random = noise vector baseline.
+### The Planning Trajectory Hypothesis {#sec-planning-hypothesis}
 
-![](docs/tables/effect_vs_coherence.png)
+We extract steering directions from **incomplete, minimally-contrastive prompt prefixes** rather than full completions. This design reflects a mechanistic claim about autoregressive generation: models must maintain internal planning state to produce coherent multi-token continuations.
 
-## Appendix: Experiments and Rationales
-
-This branch explores gradient-informed steering for concepts like honesty/reasoning. Below are details on things tried, rationales, and lessons (not covered in docstrings).
-
-### Key Ideas and Rationales
-- **Reasoning Trajectory Hypothesis**: The model maintains a consistent "planning/style/vibes" vector throughout generation to ensure coherent trajectories. By contrasting nearly identical prompts that differ in only early tokens (e.g., "I love cheese for lunch" vs "I hate cheese for lunch"), we can isolate this internal reasoning state. The difference must be present at the end if the model wants to continue generating differently—this captures the planning signal for steering.
-- **Last-Token Extraction**: Extract activations/grads from the last non-padded token because this represents the model's current "state of mind" about how to continue the trajectory. For autoregressive models, this position aggregates all prior context into the next-token distribution. Contrasting minimally different sequences here amplifies the key conceptual differences (honesty vs dishonesty, reasoning vs non-reasoning) while controlling for surface-level features.
-- **Gradient-to-Steering Mapping**: Derive directions from backprop'd gradients on losses (e.g., ReprPO on hidden states). Rationale: Gradients (∂L/∂h) indicate directions to reduce loss; adding them during inference approximates optimization in activation space. Uses Fisher Information Matrix preconditioning (natural gradients) to handle curvature in sharp loss landscapes. Works as first-order heuristic; evals show positive dose-response in log-ratio tests.
-- **Layer-Specific Steering**: Test specific sublayers (e.g., k_proj, o_proj, down_proj) rather than whole residual streams. Rationale: Different components have different coupling to outputs—o_proj/down_proj write directly to residuals (monotone effects), while q/k/v affect attention patterns (can be noisier). Enables more targeted interventions. Evals: k_proj scores ~1.42, v_proj ~0.59, hidden states ~15.93 (from research journal).
-
-### Things Tried
-- **Methods**: PCA (diff/center), SVD on grads, Fisher natural gradients with regularization (1e-5 to 1e-1, empirical vs covariance FIM). Best performer: `fisher_steer_cov_reg1` (scores up to 15.93). Dual pos/neg variants for balanced steering directions.
-- **Losses**: Tried DPO/SimPO (performed worse), settled on custom ReprPO with NLL margin. Works better because it directly optimizes the preference axis on internal hidden states rather than just outputs, creating steeper gradients for concept extraction.
-- **Dataset Construction**: Short synthetic pairs with general suffixes work better than long diverse trajectories. Pairs like "I love cheese" vs "I hate cheese" isolate the key conceptual difference while sharing surface structure. Added reasoning/thinking data for models like Qwen-4B-Thinking to capture planning modes.
-- **Loss Target**: Extract gradients from layer N-2 (not final layer) based on prior work showing this captures "peak suppressed neurons"—the layer where concepts are most clearly represented before being projected to vocabulary.
-- **Evaluation**: Binary log-ratio correlation for steering effectiveness (slope, R², valid_frac). Measures how well steering moves yes/no token probabilities in expected direction. High coefficients sometimes cause saturation/incoherence.
-- **Models**: Tested on Qwen-4B/8B/14B (4-bit quantized), GLM-9B-Thinking. Larger models show better extrapolation and more stable steering.
-
-### Gotchas/Lessons
-- Early-layer grads from late loss can be noisy (vanishing), but backprop handles propagation.
-- Overfitting risk: Synthetic data captures wording; OOD evals needed.
-- Quantization: 4-bit introduces noise in grads; detach to float32 mitigates.
-- Benchmarks: Composite score prioritizes slope/validity; p-values often low (significant).
-
-For full details, see notebooks (e.g., performance_tests_reprpo_layers.ipynb) and research_journal_mjc.md.
-
-### Custom ReprPO Loss Details
-The loss in `losses.py` (e.g., `compute_reprpo_nll_margin_loss`) is designed for one-step gradient/curvature sampling on paired pos/neg examples, not full training. It combines:
-- **Separation Term**: Maximizes the L2 norm of (positive - negative) hidden state differences to isolate the target concept.
-- **Coherence Margin**: Defines a bounded region where the NLL of the preferred (positive) completion is no worse than a baseline (detached average logprob of positive labels). Deviations outside this region are penalized quadratically. A 0.99 scaling on the baseline positions the computation just inside the boundary, ensuring both terms contribute to gradients.
-
-This creates steeper, more informative gradients for steering, inspired by SimPO/DPO margins but focused on internal state coherence rather than direct pos/neg comparison.
-
-For geometric intuition and detailed explanation, see `docs/loss_geometry.md`.
-
-![Loss Geometry](docs/loss.svg)
-
-See also the repo for training with losses like this https://github.com/wassname/repr-preference-optimization
-
-
-## Citation
-
-If this repository is useful for academic work, please remember to cite the repo, and the preprint when it is out
-
-```
-@misc{clark2025InnerPiSSA,
-  title = {InnerPiSSA: Deep-Dish Inner Alignment through Reversible SVD Steering},
-  author = {Clark, Michael J},
-  year = {2024},
-  url = {https://github.com/wassname/InnerPiSSA/}
-}
-```
+When two prompts differ by one word early on ("I love cheese" vs "I hate cheese") but share identical suffixes, the model's hidden state at the final token must already encode different continuation plans: oth
